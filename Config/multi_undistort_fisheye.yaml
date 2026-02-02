@@ -1,0 +1,130 @@
+%YAML:1.0
+---
+# ORB-SLAM3 multi-fisheye configuration
+
+#--------------------------------------------
+# Camera Model
+#--------------------------------------------
+File.version: "1.0"
+
+Camera.type: "PinHole"
+Camera.nCam: 4
+Camera.width: 1920
+Camera.height: 1536
+
+# Intrinsics (four fisheye cams). Width/height taken from dataset.
+#LEFT
+Camera0.fx: 211.672212
+Camera0.fy: 211.661226
+Camera0.cx: 951.596559
+Camera0.cy: 759.374848
+Camera0.k1: 0.0
+Camera0.k2: 0.0
+Camera0.p1: 0.0
+Camera0.p2: 0.0
+Camera0.k3: 0.0
+Camera0.k4: 0.0
+Camera0.width: 1920
+Camera0.height: 1536
+
+#FRONT
+Camera1.fx: 272.433797
+Camera1.fy: 272.437394
+Camera1.cx: 1044.989262
+Camera1.cy: 832.535850
+Camera1.k1: 0.0
+Camera1.k2: 0.0
+Camera1.p1: 0.0
+Camera1.p2: 0.0
+Camera1.k3: 0.0
+Camera1.k4: 0.0
+Camera1.width: 1920
+Camera1.height: 1536
+
+#RIGHT
+Camera2.fx: 211.325437
+Camera2.fy: 211.286077
+Camera2.cx: 951.240263
+Camera2.cy: 759.521504
+Camera2.k1: 0.0
+Camera2.k2: 0.0
+Camera2.p1: 0.0
+Camera2.p2: 0.0
+Camera2.k3: 0.0
+Camera2.k4: 0.0
+Camera2.width: 1920
+Camera2.height: 1536
+
+#REAR
+Camera3.fx: 210.715006
+Camera3.fy: 210.618036
+Camera3.cx: 952.473673
+Camera3.cy: 759.539829
+Camera3.k1: 0.0
+Camera3.k2: 0.0
+Camera3.p1: 0.0
+Camera3.p2: 0.0
+Camera3.k3: 0.0
+Camera3.k4: 0.0
+Camera3.width: 1920
+Camera3.height: 1536
+
+# Extrinsics: 
+Camera0.Tcw: !!opencv-matrix
+   rows: 4
+   cols: 4
+   dt: f
+   data: [ 9.97970998e-01, 4.54562008e-02, 4.45816001e-02, 2.07534504e+00,
+           -2.25862991e-02,-4.01914001e-01, 9.15399015e-01, 1.10641503e+00,
+            5.95284998e-02,-9.14547980e-01,-4.00072008e-01, 1.10385001e+00,
+            0., 0., 0., 1. ]
+
+Camera1.Tcw: !!opencv-matrix
+   rows: 4
+   cols: 4
+   dt: f
+   data: [ -5.27248997e-03,-2.18945995e-01, 9.75723028e-01, 3.83664513e+00,
+           -9.99792993e-01, 2.03352999e-02,-8.39455985e-04,-1.56149864e-02,
+           -1.96578000e-02,-9.75525022e-01,-2.19007000e-01, 6.62055016e-01,
+            0., 0., 0., 1. ]
+
+Camera2.Tcw: !!opencv-matrix
+   rows: 4
+   cols: 4
+   dt: f
+   data: [ -9.96035993e-01, 9.18410998e-03,-8.84737000e-02, 2.05341482e+00,
+            8.34513009e-02, 4.40751999e-01,-8.93741012e-01,-1.10641503e+00,
+            3.07867005e-02,-8.97581995e-01,-4.39770997e-01, 1.11561000e+00,
+            0., 0., 0., 1. ]
+
+Camera3.Tcw: !!opencv-matrix
+   rows: 4
+   cols: 4
+   dt: f
+   data: [ -4.82124984e-02, 1.49577007e-01,-9.87573981e-01,-1.03664505e+00,
+            9.98350024e-01, 3.80831994e-02,-4.29705009e-02, 3.28350067e-02,
+            3.11826002e-02,-9.88016009e-01,-1.51166007e-01, 9.19927001e-01,
+            0., 0., 0., 1. ]
+
+# Image info (fill actual values)
+Camera.fps: 30
+Camera.RGB: 0
+
+# ORB Parameters
+ORBextractor.nFeatures: 4800
+ORBextractor.scaleFactor: 1.2
+ORBextractor.nLevels: 7
+ORBextractor.iniThFAST: 12
+ORBextractor.minThFAST: 7
+
+# Viewer / System
+Viewer.KeyFrameSize: 0.6
+Viewer.KeyFrameLineWidth: 1.0
+Viewer.GraphLineWidth: 0.9
+Viewer.PointSize: 2.0
+Viewer.CameraSize: 0.8
+Viewer.CameraLineWidth: 3.0
+Viewer.ViewpointX: 0.0
+Viewer.ViewpointY: -0.7
+Viewer.ViewpointZ: -3.5
+Viewer.ViewpointF: 500.0

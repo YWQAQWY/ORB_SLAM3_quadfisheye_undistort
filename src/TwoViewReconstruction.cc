@@ -41,6 +41,7 @@ namespace ORB_SLAM3
     bool TwoViewReconstruction::Reconstruct(const std::vector<cv::KeyPoint>& vKeys1, const std::vector<cv::KeyPoint>& vKeys2, const vector<int> &vMatches12,
                                              Sophus::SE3f &T21, vector<cv::Point3f> &vP3D, vector<bool> &vbTriangulated)
     {
+        //准备工作（"整理照片对比表"）
         mvKeys1.clear();
         mvKeys2.clear();
 
@@ -63,6 +64,8 @@ namespace ORB_SLAM3
                 mvbMatched1[i]=false;
         }
 
+
+        //RANSAC预采样（"抽签选代表")
         const int N = mvMatches12.size();
 
         // Indices for minimum set selection
@@ -97,11 +100,14 @@ namespace ORB_SLAM3
             }
         }
 
-        // Launch threads to compute in parallel a fundamental matrix and a homography
-        vector<bool> vbMatchesInliersH, vbMatchesInliersF;
-        float SH, SF;
-        Eigen::Matrix3f H, F;
 
+        // 并行算两种模型（"双管齐下"）
+        // Launch threads to compute in parallel a fundamental matrix and a homography
+        vector<bool> vbMatchesInliersH, vbMatchesInliersF; // 哪些点符合H/F模型
+        float SH, SF;  // H和F的得分（好坏程度）
+        Eigen::Matrix3f H, F; // 单应矩阵H和基础矩阵F
+
+        // 开两个线程同时算！
         thread threadH(&TwoViewReconstruction::FindHomography,this,ref(vbMatchesInliersH), ref(SH), ref(H));
         thread threadF(&TwoViewReconstruction::FindFundamental,this,ref(vbMatchesInliersF), ref(SF), ref(F));
 
@@ -109,22 +115,39 @@ namespace ORB_SLAM3
         threadH.join();
         threadF.join();
 
+        //选择用哪个模型
         // Compute ratio of scores
-        if(SH+SF == 0.f) return false;
-        float RH = SH/(SH+SF);
+        if(SH+SF == 0.f) return false; // all o means failure
+        float RH = SH/(SH+SF);// 算比例：H占多少分？F占多少分？
 
-        float minParallax = 1.0;
+        std::cout << "[Init] TwoView scores: SH=" << SH
+                  << " SF=" << SF
+                  << " RH=" << RH
+                  << " matches=" << N
+                  << std::endl;
+
+        float minParallax = 1.0; //1.0  // 最小视差角（度数），防止平移太小算不准
 
         // Try to reconstruct from homography or fundamental depending on the ratio (0.40-0.45)
-        if(RH>0.50) // if(RH>0.40)
+        if(RH>0.50) // 如果RH > 0.5，说明H（单应矩阵）得分高，场景可能是平面的或纯旋转
         {
-            //cout << "Initialization from Homography" << endl;
-            return ReconstructH(vbMatchesInliersH,H, mK,T21,vP3D,vbTriangulated,minParallax,50);
+            cout << "Initialization from Homography" << endl;
+            bool ok = ReconstructH(vbMatchesInliersH,H, mK,T21,vP3D,vbTriangulated,minParallax,30);//50
+            std::cout << "[Init] ReconstructH ok=" << ok
+                      << " tri=" << std::count(vbTriangulated.begin(), vbTriangulated.end(), true)
+                      << " minParallax=" << minParallax
+                      << std::endl;
+            return ok;
         }
-        else //if(pF_HF>0.6)
+        else  // 如果RH < 0.5，说明F（fundamental矩阵）得分高，适用于一般透视场景
         {
-            //cout << "Initialization from Fundamental" << endl;
-            return ReconstructF(vbMatchesInliersF,F,mK,T21,vP3D,vbTriangulated,minParallax,50);
+            cout << "Initialization from Fundamental" << endl;
+            bool ok = ReconstructF(vbMatchesInliersF,F,mK,T21,vP3D,vbTriangulated,minParallax,30);//50
+            std::cout << "[Init] ReconstructF ok=" << ok
+                      << " tri=" << std::count(vbTriangulated.begin(), vbTriangulated.end(), true)
+                      << " minParallax=" << minParallax
+                      << std::endl;
+            return ok;
         }
     }
 
@@ -472,6 +495,7 @@ namespace ORB_SLAM3
         return score;
     }
 
+    // F/E matrix calculate Perspective
     bool TwoViewReconstruction::ReconstructF(vector<bool> &vbMatchesInliers, Eigen::Matrix3f &F21, Eigen::Matrix3f &K,
                                              Sophus::SE3f &T21, vector<cv::Point3f> &vP3D, vector<bool> &vbTriangulated, float minParallax, int minTriangulated)
     {
@@ -480,7 +504,7 @@ namespace ORB_SLAM3
             if(vbMatchesInliers[i])
                 N++;
 
-        // Compute Essential Matrix from Fundamental Matrix
+        // Compute Essential Matrix from Fundamental Matrix (E)
         Eigen::Matrix3f E21 = K.transpose() * F21 * K;
 
         Eigen::Matrix3f R1, R2;
@@ -568,6 +592,7 @@ namespace ORB_SLAM3
         return false;
     }
 
+    //H matrix calculate Homography
     bool TwoViewReconstruction::ReconstructH(vector<bool> &vbMatchesInliers, Eigen::Matrix3f &H21, Eigen::Matrix3f &K,
                                              Sophus::SE3f &T21, vector<cv::Point3f> &vP3D, vector<bool> &vbTriangulated, float minParallax, int minTriangulated)
     {
