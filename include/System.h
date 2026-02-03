@@ -120,6 +120,9 @@ public:
     // Returns the camera pose (empty if tracking fails).
     Sophus::SE3f TrackMonocular(const cv::Mat &im, const double &timestamp, const vector<IMU::Point>& vImuMeas = vector<IMU::Point>(), string filename="");
 
+    // Process a synchronized multi-camera frame (cam0 is the rig center).
+    Sophus::SE3f TrackMulti(const std::vector<cv::Mat> &images, const double &timestamp, string filename="");
+
 
     // This stops local mapping thread (map building) and performs only camera tracking.
     void ActivateLocalizationMode();

@@ -24,16 +24,49 @@ namespace ORB_SLAM3
 
 ImuCamPose::ImuCamPose(KeyFrame *pKF):its(0)
 {
+    int num_cams = 1;
+    if(pKF->mnCams > 1)
+        num_cams = pKF->mnCams;
+    else if(pKF->mpCamera2)
+        num_cams = 2;
+
+    if(pKF->mnCams > 1)
+    {
+        Sophus::SE3f Tcw_rig = pKF->GetPose();
+        Sophus::SE3f Twc_rig = Tcw_rig.inverse();
+        Rwb = Twc_rig.rotationMatrix().cast<double>();
+        twb = Twc_rig.translation().cast<double>();
+
+        tcw.resize(num_cams);
+        Rcw.resize(num_cams);
+        tcb.resize(num_cams);
+        Rcb.resize(num_cams);
+        Rbc.resize(num_cams);
+        tbc.resize(num_cams);
+        pCamera.resize(num_cams);
+
+        for(int cam = 0; cam < num_cams; ++cam)
+        {
+            Sophus::SE3f Tcr = pKF->mvTcr[cam];
+            Sophus::SE3f Tcw = Tcr * Tcw_rig;
+            Rcw[cam] = Tcw.rotationMatrix().cast<double>();
+            tcw[cam] = Tcw.translation().cast<double>();
+            Rcb[cam] = Tcr.rotationMatrix().cast<double>();
+            tcb[cam] = Tcr.translation().cast<double>();
+            Rbc[cam] = Rcb[cam].transpose();
+            tbc[cam] = -Rbc[cam] * tcb[cam];
+            pCamera[cam] = pKF->mvpCameras[cam];
+        }
+
+        bf = pKF->mbf;
+        Rwb0 = Rwb;
+        DR.setIdentity();
+        return;
+    }
+
     // Load IMU pose
     twb = pKF->GetImuPosition().cast<double>();
     Rwb = pKF->GetImuRotation().cast<double>();
-
-    // Load camera poses
-    int num_cams;
-    if(pKF->mpCamera2)
-        num_cams=2;
-    else
-        num_cams=1;
 
     tcw.resize(num_cams);
     Rcw.resize(num_cams);
@@ -72,16 +105,49 @@ ImuCamPose::ImuCamPose(KeyFrame *pKF):its(0)
 
 ImuCamPose::ImuCamPose(Frame *pF):its(0)
 {
+    int num_cams = 1;
+    if(pF->mnCams > 1)
+        num_cams = pF->mnCams;
+    else if(pF->mpCamera2)
+        num_cams = 2;
+
+    if(pF->mnCams > 1)
+    {
+        Sophus::SE3f Tcw_rig = pF->GetPose();
+        Sophus::SE3f Twc_rig = Tcw_rig.inverse();
+        Rwb = Twc_rig.rotationMatrix().cast<double>();
+        twb = Twc_rig.translation().cast<double>();
+
+        tcw.resize(num_cams);
+        Rcw.resize(num_cams);
+        tcb.resize(num_cams);
+        Rcb.resize(num_cams);
+        Rbc.resize(num_cams);
+        tbc.resize(num_cams);
+        pCamera.resize(num_cams);
+
+        for(int cam = 0; cam < num_cams; ++cam)
+        {
+            Sophus::SE3f Tcr = pF->mvTcr[cam];
+            Sophus::SE3f Tcw = Tcr * Tcw_rig;
+            Rcw[cam] = Tcw.rotationMatrix().cast<double>();
+            tcw[cam] = Tcw.translation().cast<double>();
+            Rcb[cam] = Tcr.rotationMatrix().cast<double>();
+            tcb[cam] = Tcr.translation().cast<double>();
+            Rbc[cam] = Rcb[cam].transpose();
+            tbc[cam] = -Rbc[cam] * tcb[cam];
+            pCamera[cam] = pF->mvpCameras[cam];
+        }
+
+        bf = pF->mbf;
+        Rwb0 = Rwb;
+        DR.setIdentity();
+        return;
+    }
+
     // Load IMU pose
     twb = pF->GetImuPosition().cast<double>();
     Rwb = pF->GetImuRotation().cast<double>();
-
-    // Load camera poses
-    int num_cams;
-    if(pF->mpCamera2)
-        num_cams=2;
-    else
-        num_cams=1;
 
     tcw.resize(num_cams);
     Rcw.resize(num_cams);

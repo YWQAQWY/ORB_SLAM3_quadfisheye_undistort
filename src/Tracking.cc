@@ -30,6 +30,7 @@
 #include "GeometricTools.h"
 
 #include <iostream>
+#include <opencv2/core/eigen.hpp>
 
 #include <mutex>
 #include <chrono>
@@ -594,6 +595,15 @@ void Tracking::newParameterLoader(Settings *settings) {
 
     mpORBextractorLeft = new ORBextractor(nFeatures,fScaleFactor,nLevels,fIniThFAST,fMinThFAST);
 
+    mvpORBextractors.clear();
+    if(mnCams > 1)
+    {
+        for(int cam = 0; cam < mnCams; ++cam)
+        {
+            mvpORBextractors.push_back(new ORBextractor(nFeatures,fScaleFactor,nLevels,fIniThFAST,fMinThFAST));
+        }
+    }
+
     if(mSensor==System::STEREO || mSensor==System::IMU_STEREO)
         mpORBextractorRight = new ORBextractor(nFeatures,fScaleFactor,nLevels,fIniThFAST,fMinThFAST);
 
@@ -622,7 +632,114 @@ bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
     cout << endl << "Camera Parameters: " << endl;
     bool b_miss_params = false;
 
+    int nCam = 1;
+    cv::FileNode nCamNode = fSettings["Camera.nCam"];
+    if(!nCamNode.empty() && nCamNode.isInt())
+        nCam = nCamNode.operator int();
+    mnCams = nCam;
+
     string sCameraName = fSettings["Camera.type"];
+    if(nCam > 1)
+    {
+        if(sCameraName != "PinHole")
+        {
+            std::cerr << "*Multi-camera rig expects PinHole type in config*" << std::endl;
+            return false;
+        }
+
+        mImageScale = 1.f;
+        mvpCameras.clear();
+        mvTcr.clear();
+
+        std::vector<Sophus::SE3f> T_b_c(nCam);
+        for(int cam = 0; cam < nCam; ++cam)
+        {
+            string prefix = "Camera" + to_string(cam) + ".";
+            float fx = 0.0f, fy = 0.0f, cx = 0.0f, cy = 0.0f;
+
+            cv::FileNode node = fSettings[prefix + "fx"];
+            if(!node.empty() && node.isReal())
+                fx = node.real();
+            else
+                b_miss_params = true;
+
+            node = fSettings[prefix + "fy"];
+            if(!node.empty() && node.isReal())
+                fy = node.real();
+            else
+                b_miss_params = true;
+
+            node = fSettings[prefix + "cx"];
+            if(!node.empty() && node.isReal())
+                cx = node.real();
+            else
+                b_miss_params = true;
+
+            node = fSettings[prefix + "cy"];
+            if(!node.empty() && node.isReal())
+                cy = node.real();
+            else
+                b_miss_params = true;
+
+            vector<float> vCamCalib{fx,fy,cx,cy};
+            GeometricCamera* pCam = new Pinhole(vCamCalib);
+            pCam = mpAtlas->AddCamera(pCam);
+            mvpCameras.push_back(pCam);
+
+            cv::Mat extMat;
+            bool isTcw = false;
+            node = fSettings[prefix + "Twc"];
+            if(!node.empty())
+                extMat = node.mat();
+            if(extMat.empty())
+            {
+                node = fSettings[prefix + "Tcw"];
+                if(!node.empty())
+                {
+                    extMat = node.mat();
+                    isTcw = true;
+                }
+            }
+            if(extMat.empty() || extMat.rows != 4 || extMat.cols != 4)
+            {
+                std::cerr << "*" << prefix << "Twc/Tcw missing or invalid*" << std::endl;
+                return false;
+            }
+
+            Eigen::Matrix4f eigMat;
+            cv::cv2eigen(extMat, eigMat);
+            Eigen::Matrix3f R = eigMat.block<3,3>(0,0);
+            Eigen::Vector3f t = eigMat.block<3,1>(0,3);
+            Sophus::SE3f T = Sophus::SE3f(R, t);
+            if(isTcw)
+                T = T.inverse();
+            T_b_c[cam] = T;
+        }
+
+        if(b_miss_params)
+            return false;
+
+        Sophus::SE3f T_b_c0 = T_b_c[0];
+        Sophus::SE3f T_c0_b = T_b_c0.inverse();
+        mvTcr.resize(nCam);
+        for(int cam = 0; cam < nCam; ++cam)
+        {
+            mvTcr[cam] = T_c0_b * T_b_c[cam];
+        }
+
+        mpCamera = mvpCameras[0];
+        mpCamera2 = nullptr;
+
+        if(mpCamera->GetType() == GeometricCamera::CAM_PINHOLE)
+        {
+            Pinhole* pPin = static_cast<Pinhole*>(mpCamera);
+            mK = pPin->toK();
+            mK_ = pPin->toK_();
+        }
+
+        return true;
+    }
+
     if(sCameraName == "PinHole")
     {
         float fx, fy, cx, cy;
@@ -1211,6 +1328,14 @@ bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
         return false;
     }
 
+    if(mnCams == 1 && mpCamera)
+    {
+        mvpCameras.clear();
+        mvpCameras.push_back(mpCamera);
+        mvTcr.clear();
+        mvTcr.push_back(Sophus::SE3f());
+    }
+
     return true;
 }
 
@@ -1597,6 +1722,76 @@ Sophus::SE3f Tracking::GrabImageMonocular(const cv::Mat &im, const double &times
         else
             mCurrentFrame = Frame(mImGray,timestamp,mpORBextractorLeft,mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth,&mLastFrame,*mpImuCalib);
     }
+
+    if (mState==NO_IMAGES_YET)
+        t0=timestamp;
+
+    mCurrentFrame.mNameFile = filename;
+    mCurrentFrame.mnDataset = mnNumDataset;
+
+#ifdef REGISTER_TIMES
+    vdORBExtract_ms.push_back(mCurrentFrame.mTimeORB_Ext);
+#endif
+
+    lastID = mCurrentFrame.mnId;
+    Track();
+
+    return mCurrentFrame.GetPose();
+}
+
+Sophus::SE3f Tracking::GrabImageMulti(const std::vector<cv::Mat> &images, const double &timestamp, string filename)
+{
+    if(images.empty())
+        return Sophus::SE3f();
+
+    if(mState==NOT_INITIALIZED || mState==NO_IMAGES_YET)
+    {
+        return GrabImageMonocular(images[0], timestamp, filename);
+    }
+
+    std::vector<cv::Mat> gray_images;
+    gray_images.reserve(images.size());
+    for(const auto &im : images)
+    {
+        cv::Mat imGray = im;
+        if(imGray.channels()==3)
+        {
+            if(mbRGB)
+                cvtColor(imGray,imGray,cv::COLOR_RGB2GRAY);
+            else
+                cvtColor(imGray,imGray,cv::COLOR_BGR2GRAY);
+        }
+        else if(imGray.channels()==4)
+        {
+            if(mbRGB)
+                cvtColor(imGray,imGray,cv::COLOR_RGBA2GRAY);
+            else
+                cvtColor(imGray,imGray,cv::COLOR_BGRA2GRAY);
+        }
+
+        if(mImageScale != 1.f)
+        {
+            int width = static_cast<int>(imGray.cols * mImageScale);
+            int height = static_cast<int>(imGray.rows * mImageScale);
+            cv::resize(imGray, imGray, cv::Size(width, height));
+        }
+
+        gray_images.push_back(imGray);
+    }
+
+    std::vector<ORBextractor*> extractors = mvpORBextractors;
+    if(extractors.empty())
+        extractors.push_back(mpORBextractorLeft);
+
+    std::vector<GeometricCamera*> cameras = mvpCameras;
+    if(cameras.empty())
+        cameras.push_back(mpCamera);
+
+    std::vector<Sophus::SE3f> Tcr = mvTcr;
+    if(Tcr.size() != cameras.size())
+        Tcr.assign(cameras.size(), Sophus::SE3f());
+
+    mCurrentFrame = Frame(gray_images,timestamp,extractors,mpORBVocabulary,cameras,Tcr,mbf,mThDepth,&mLastFrame);
 
     if (mState==NO_IMAGES_YET)
         t0=timestamp;
@@ -3374,13 +3569,38 @@ void Tracking::SearchLocalPoints()
         if(pMP->isBad())
             continue;
         // Project (this fills MapPoint variables for matching)
-        if(mCurrentFrame.isInFrustum(pMP,0.5))
+        bool bInView = false;
+        if(mCurrentFrame.mnCams > 1 && mCurrentFrame.Nleft == -1)
+        {
+            float bestCos = -1.0f;
+            int bestCam = -1;
+            for(int cam = 0; cam < mCurrentFrame.mnCams; ++cam)
+            {
+                if(mCurrentFrame.isInFrustum(pMP,0.5,cam))
+                {
+                    if(pMP->mTrackViewCos > bestCos)
+                    {
+                        bestCos = pMP->mTrackViewCos;
+                        bestCam = cam;
+                    }
+                }
+            }
+
+            if(bestCam >= 0)
+            {
+                mCurrentFrame.isInFrustum(pMP,0.5,bestCam);
+                bInView = true;
+            }
+        }
+        else
+        {
+            bInView = mCurrentFrame.isInFrustum(pMP,0.5);
+        }
+
+        if(bInView)
         {
             pMP->IncreaseVisible();
             nToMatch++;
-        }
-        if(pMP->mbTrackInView)
-        {
             mCurrentFrame.mmProjectPoints[pMP->mnId] = cv::Point2f(pMP->mTrackProjX, pMP->mTrackProjY);
         }
     }

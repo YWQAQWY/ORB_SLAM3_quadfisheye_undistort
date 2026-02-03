@@ -48,6 +48,7 @@ Frame::Frame(): mpcpi(NULL), mpImuPreintegrated(NULL), mpPrevFrame(NULL), mpImuP
     mTimeStereoMatch = 0;
     mTimeORB_Ext = 0;
 #endif
+    mnCams = 1;
 }
 
 
@@ -91,6 +92,12 @@ Frame::Frame(const Frame &frame)
     mmProjectPoints = frame.mmProjectPoints;
     mmMatchedInImage = frame.mmMatchedInImage;
 
+    mnCams = frame.mnCams;
+    mvpCameras = frame.mvpCameras;
+    mvTcr = frame.mvTcr;
+    mvKeyPointCamId = frame.mvKeyPointCamId;
+    mvGrids = frame.mvGrids;
+
 #ifdef REGISTER_TIMES
     mTimeStereoMatch = frame.mTimeStereoMatch;
     mTimeORB_Ext = frame.mTimeORB_Ext;
@@ -130,6 +137,13 @@ Frame::Frame(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timeSt
 #endif
 
     N = mvKeys.size();
+    mnCams = 1;
+    mvpCameras.clear();
+    mvpCameras.push_back(mpCamera);
+    mvTcr.clear();
+    mvTcr.push_back(Sophus::SE3f());
+    mvKeyPointCamId = vector<int>(N, 0);
+
     if(mvKeys.empty())
         return;
 
@@ -228,6 +242,12 @@ Frame::Frame(const cv::Mat &imGray, const cv::Mat &imDepth, const double &timeSt
 
 
     N = mvKeys.size();
+    mnCams = 1;
+    mvpCameras.clear();
+    mvpCameras.push_back(mpCamera);
+    mvTcr.clear();
+    mvTcr.push_back(Sophus::SE3f());
+    mvKeyPointCamId = vector<int>(N, 0);
 
     if(mvKeys.empty())
         return;
@@ -317,6 +337,13 @@ Frame::Frame(const cv::Mat &imGray, const double &timeStamp, ORBextractor* extra
 
 
     N = mvKeys.size();
+    mnCams = 1;
+    mvpCameras.clear();
+    mvpCameras.push_back(mpCamera);
+    mvTcr.clear();
+    mvTcr.push_back(Sophus::SE3f());
+    mvKeyPointCamId = vector<int>(N, 0);
+
     if(mvKeys.empty())
         return;
 
@@ -381,6 +408,116 @@ Frame::Frame(const cv::Mat &imGray, const double &timeStamp, ORBextractor* extra
     mpMutexImu = new std::mutex();
 }
 
+Frame::Frame(const std::vector<cv::Mat> &images, const double &timeStamp,
+             const std::vector<ORBextractor*> &extractors, ORBVocabulary* voc,
+             const std::vector<GeometricCamera*> &cameras,
+             const std::vector<Sophus::SE3f> &Tcr,
+             const float &bf, const float &thDepth, Frame* pPrevF)
+    :mpcpi(NULL),mpORBvocabulary(voc),mpORBextractorLeft(static_cast<ORBextractor*>(NULL)),mpORBextractorRight(static_cast<ORBextractor*>(NULL)),
+     mTimeStamp(timeStamp), mbf(bf), mThDepth(thDepth), mpImuPreintegrated(NULL), mpPrevFrame(pPrevF), mpImuPreintegratedFrame(NULL),
+     mpReferenceKF(static_cast<KeyFrame*>(NULL)), mbIsSet(false), mbImuPreintegrated(false), mpCamera(nullptr), mpCamera2(nullptr),
+     mbHasPose(false), mbHasVelocity(false)
+{
+    mnId=nNextId++;
+
+    mnCams = static_cast<int>(cameras.size());
+    mvpCameras = cameras;
+    mvTcr = Tcr;
+    mDistCoef = cv::Mat::zeros(4,1,CV_32F);
+
+    if(extractors.empty() || images.empty())
+        return;
+
+    mnScaleLevels = extractors[0]->GetLevels();
+    mfScaleFactor = extractors[0]->GetScaleFactor();
+    mfLogScaleFactor = log(mfScaleFactor);
+    mvScaleFactors = extractors[0]->GetScaleFactors();
+    mvInvScaleFactors = extractors[0]->GetInverseScaleFactors();
+    mvLevelSigma2 = extractors[0]->GetScaleSigmaSquares();
+    mvInvLevelSigma2 = extractors[0]->GetInverseScaleSigmaSquares();
+
+    mvKeys.clear();
+    mvKeysUn.clear();
+    mDescriptors.release();
+    mvKeyPointCamId.clear();
+
+    for(size_t cam = 0; cam < images.size(); ++cam)
+    {
+        if(cam >= extractors.size())
+            break;
+        vector<cv::KeyPoint> vKeys;
+        cv::Mat desc;
+        vector<int> vLapping = {0, 0};
+        (*extractors[cam])(images[cam], cv::Mat(), vKeys, desc, vLapping);
+        if(vKeys.empty())
+            continue;
+
+        mvKeysUn.insert(mvKeysUn.end(), vKeys.begin(), vKeys.end());
+        mvKeyPointCamId.insert(mvKeyPointCamId.end(), vKeys.size(), static_cast<int>(cam));
+
+        if(mDescriptors.empty())
+            mDescriptors = desc.clone();
+        else
+            cv::vconcat(mDescriptors, desc, mDescriptors);
+    }
+
+    mvKeys = mvKeysUn;
+    N = static_cast<int>(mvKeysUn.size());
+    if(N == 0)
+        return;
+
+    mvuRight = vector<float>(N,-1);
+    mvDepth = vector<float>(N,-1);
+    mnCloseMPs = 0;
+
+    mvpMapPoints = vector<MapPoint*>(N,static_cast<MapPoint*>(NULL));
+    mvbOutlier = vector<bool>(N,false);
+
+    if(mbInitialComputations && !images.empty())
+    {
+        ComputeImageBounds(images[0]);
+
+        mfGridElementWidthInv=static_cast<float>(FRAME_GRID_COLS)/static_cast<float>(mnMaxX-mnMinX);
+        mfGridElementHeightInv=static_cast<float>(FRAME_GRID_ROWS)/static_cast<float>(mnMaxY-mnMinY);
+
+        if(!cameras.empty() && cameras[0]->GetType() == GeometricCamera::CAM_PINHOLE)
+        {
+            Pinhole* pPin = static_cast<Pinhole*>(cameras[0]);
+            mK = pPin->toK();
+            mK_ = pPin->toK_();
+            fx = mK.at<float>(0,0);
+            fy = mK.at<float>(1,1);
+            cx = mK.at<float>(0,2);
+            cy = mK.at<float>(1,2);
+            invfx = 1.0f/fx;
+            invfy = 1.0f/fy;
+        }
+
+        mbInitialComputations=false;
+    }
+
+    mb = (fx != 0.0f) ? mbf/fx : 0.0f;
+
+    if(pPrevF){
+        if(pPrevF->HasVelocity())
+            SetVelocity(pPrevF->GetVelocity());
+    }
+    else{
+        mVw.setZero();
+    }
+
+    Nleft = -1;
+    Nright = -1;
+    mvLeftToRightMatch = vector<int>(0);
+    mvRightToLeftMatch = vector<int>(0);
+    mvStereo3Dpoints = vector<Eigen::Vector3f>(0);
+    monoLeft = -1;
+    monoRight = -1;
+
+    AssignFeaturesToGrid();
+    mpMutexImu = new std::mutex();
+}
+
 
 void Frame::AssignFeaturesToGrid()
 {
@@ -388,6 +525,20 @@ void Frame::AssignFeaturesToGrid()
     const int nCells = FRAME_GRID_COLS*FRAME_GRID_ROWS;
 
     int nReserve = 0.5f*N/(nCells);
+
+    mvGrids.clear();
+    if(mnCams > 1){
+        mvGrids.resize(mnCams);
+        for(int cam = 0; cam < mnCams; ++cam){
+            mvGrids[cam].resize(FRAME_GRID_COLS);
+            for(int ix = 0; ix < FRAME_GRID_COLS; ++ix){
+                mvGrids[cam][ix].resize(FRAME_GRID_ROWS);
+                for(int iy = 0; iy < FRAME_GRID_ROWS; ++iy){
+                    mvGrids[cam][ix][iy].reserve(nReserve);
+                }
+            }
+        }
+    }
 
     for(unsigned int i=0; i<FRAME_GRID_COLS;i++)
         for (unsigned int j=0; j<FRAME_GRID_ROWS;j++){
@@ -405,12 +556,25 @@ void Frame::AssignFeaturesToGrid()
                                                  : (i < Nleft) ? mvKeys[i]
                                                                  : mvKeysRight[i - Nleft];
 
+        int camId = 0;
+        if(!mvKeyPointCamId.empty()){
+            camId = mvKeyPointCamId[i];
+        } else if(Nleft != -1 && i >= Nleft){
+            camId = 1;
+        }
+
         int nGridPosX, nGridPosY;
         if(PosInGrid(kp,nGridPosX,nGridPosY)){
-            if(Nleft == -1 || i < Nleft)
+            if(Nleft != -1){
+                if(i < Nleft)
+                    mGrid[nGridPosX][nGridPosY].push_back(i);
+                else
+                    mGridRight[nGridPosX][nGridPosY].push_back(i - Nleft);
+            } else if(camId == 0){
                 mGrid[nGridPosX][nGridPosY].push_back(i);
-            else
-                mGridRight[nGridPosX][nGridPosY].push_back(i - Nleft);
+            } else if(camId < static_cast<int>(mvGrids.size())){
+                mvGrids[camId][nGridPosX][nGridPosY].push_back(i);
+            }
         }
     }
 }
@@ -511,6 +675,9 @@ Eigen::Vector3f Frame::GetRelativePoseTlr_translation() {
 
 bool Frame::isInFrustum(MapPoint *pMP, float viewingCosLimit)
 {
+    if(mnCams > 1 && Nleft == -1)
+        return isInFrustum(pMP, viewingCosLimit, 0);
+
     if(Nleft == -1){
         pMP->mbTrackInView = false;
         pMP->mTrackProjX = -1;
@@ -583,6 +750,66 @@ bool Frame::isInFrustum(MapPoint *pMP, float viewingCosLimit)
 
         return pMP->mbTrackInView || pMP->mbTrackInViewR;
     }
+}
+
+bool Frame::isInFrustum(MapPoint *pMP, float viewingCosLimit, int camId)
+{
+    if(camId < 0 || camId >= mnCams)
+        return false;
+
+    pMP->mbTrackInView = false;
+    pMP->mTrackProjX = -1;
+    pMP->mTrackProjY = -1;
+
+    // 3D in absolute coordinates
+    Eigen::Matrix<float,3,1> P = pMP->GetWorldPos();
+
+    Sophus::SE3f Tcw_cam = mvTcr[camId] * mTcw;
+    Eigen::Matrix3f Rcw_cam = Tcw_cam.rotationMatrix();
+    Eigen::Vector3f tcw_cam = Tcw_cam.translation();
+    Eigen::Vector3f Ow_cam = -Rcw_cam.transpose() * tcw_cam;
+
+    const Eigen::Matrix<float,3,1> Pc = Rcw_cam * P + tcw_cam;
+    const float Pc_dist = Pc.norm();
+
+    const float &PcZ = Pc(2);
+    const float invz = 1.0f/PcZ;
+    if(PcZ<0.0f)
+        return false;
+
+    const Eigen::Vector2f uv = mvpCameras[camId]->project(Pc);
+
+    if(uv(0)<mnMinX || uv(0)>mnMaxX)
+        return false;
+    if(uv(1)<mnMinY || uv(1)>mnMaxY)
+        return false;
+
+    // Check distance is in the scale invariance region of the MapPoint
+    const float maxDistance = pMP->GetMaxDistanceInvariance();
+    const float minDistance = pMP->GetMinDistanceInvariance();
+    const Eigen::Vector3f PO = P - Ow_cam;
+    const float dist = PO.norm();
+
+    if(dist<minDistance || dist>maxDistance)
+        return false;
+
+    Eigen::Vector3f Pn = pMP->GetNormal();
+    const float viewCos = PO.dot(Pn)/dist;
+    if(viewCos<viewingCosLimit)
+        return false;
+
+    const int nPredictedLevel = pMP->PredictScale(dist,this);
+
+    pMP->mbTrackInView = true;
+    pMP->mTrackProjX = uv(0);
+    pMP->mTrackProjXR = uv(0) - mbf*invz;
+    pMP->mTrackProjY = uv(1);
+    pMP->mTrackDepth = Pc_dist;
+    pMP->mnTrackScaleLevel= nPredictedLevel;
+    pMP->mTrackViewCos = viewCos;
+    pMP->mTrackCamId = camId;
+
+    return true;
 }
 
 bool Frame::ProjectPointDistort(MapPoint* pMP, cv::Point2f &kp, float &u, float &v)
@@ -715,6 +942,77 @@ vector<size_t> Frame::GetFeaturesInArea(const float &x, const float  &y, const f
 
                 if(fabs(distx)<factorX && fabs(disty)<factorY)
                     vIndices.push_back(vCell[j]);
+            }
+        }
+    }
+
+    return vIndices;
+}
+
+vector<size_t> Frame::GetFeaturesInArea(const float &x, const float  &y, const float  &r, const int minLevel, const int maxLevel, const int camId) const
+{
+    vector<size_t> vIndices;
+    vIndices.reserve(N);
+
+    float factorX = r;
+    float factorY = r;
+
+    const int nMinCellX = max(0,(int)floor((x-mnMinX-factorX)*mfGridElementWidthInv));
+    if(nMinCellX>=FRAME_GRID_COLS)
+    {
+        return vIndices;
+    }
+
+    const int nMaxCellX = min((int)FRAME_GRID_COLS-1,(int)ceil((x-mnMinX+factorX)*mfGridElementWidthInv));
+    if(nMaxCellX<0)
+    {
+        return vIndices;
+    }
+
+    const int nMinCellY = max(0,(int)floor((y-mnMinY-factorY)*mfGridElementHeightInv));
+    if(nMinCellY>=FRAME_GRID_ROWS)
+    {
+        return vIndices;
+    }
+
+    const int nMaxCellY = min((int)FRAME_GRID_ROWS-1,(int)ceil((y-mnMinY+factorY)*mfGridElementHeightInv));
+    if(nMaxCellY<0)
+    {
+        return vIndices;
+    }
+
+    const bool bCheckLevels = (minLevel>0) || (maxLevel>=0);
+
+    for(int ix = nMinCellX; ix<=nMaxCellX; ix++)
+    {
+        for(int iy = nMinCellY; iy<=nMaxCellY; iy++)
+        {
+            const vector<size_t> *pCell = nullptr;
+            if(camId == 0)
+                pCell = &mGrid[ix][iy];
+            else if(camId < static_cast<int>(mvGrids.size()))
+                pCell = &mvGrids[camId][ix][iy];
+
+            if(!pCell || pCell->empty())
+                continue;
+
+            for(size_t j=0, jend=pCell->size(); j<jend; j++)
+            {
+                const cv::KeyPoint &kpUn = mvKeysUn[(*pCell)[j]];
+                if(bCheckLevels)
+                {
+                    if(kpUn.octave<minLevel)
+                        continue;
+                    if(maxLevel>=0)
+                        if(kpUn.octave>maxLevel)
+                            continue;
+                }
+
+                const float distx = kpUn.pt.x-x;
+                const float disty = kpUn.pt.y-y;
+
+                if(fabs(distx)<r && fabs(disty)<r)
+                    vIndices.push_back((*pCell)[j]);
             }
         }
     }
@@ -1069,6 +1367,18 @@ Frame::Frame(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timeSt
     Nleft = mvKeys.size();
     Nright = mvKeysRight.size();
     N = Nleft + Nright;
+
+    mnCams = 2;
+    mvpCameras.clear();
+    mvpCameras.push_back(mpCamera);
+    mvpCameras.push_back(mpCamera2);
+    mvTcr.clear();
+    mvTcr.push_back(Sophus::SE3f());
+    mvTcr.push_back(Tlr);
+    mvKeyPointCamId.assign(N, 0);
+    for(int i = Nleft; i < N; ++i){
+        mvKeyPointCamId[i] = 1;
+    }
 
     if(N == 0)
         return;

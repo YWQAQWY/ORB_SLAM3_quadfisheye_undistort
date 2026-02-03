@@ -34,6 +34,7 @@ MapPoint::MapPoint():
     mpReplaced(static_cast<MapPoint*>(NULL))
 {
     mpReplaced = static_cast<MapPoint*>(NULL);
+    mTrackCamId = 0;
 }
 
 MapPoint::MapPoint(const Eigen::Vector3f &Pos, KeyFrame *pRefKF, Map* pMap):
@@ -46,6 +47,8 @@ MapPoint::MapPoint(const Eigen::Vector3f &Pos, KeyFrame *pRefKF, Map* pMap):
     SetWorldPos(Pos);
 
     mNormalVector.setZero();
+
+    mTrackCamId = 0;
 
     mbTrackInViewR = false;
     mbTrackInView = false;
@@ -68,6 +71,8 @@ MapPoint::MapPoint(const double invDepth, cv::Point2f uv_init, KeyFrame* pRefKF,
     mpHostKF = pHostKF;
 
     mNormalVector.setZero();
+
+    mTrackCamId = 0;
 
     // Worldpos is not set
     // MapPoints can be created from Tracking and Local Mapping. This mutex avoid conflicts with id.
@@ -96,6 +101,8 @@ MapPoint::MapPoint(const Eigen::Vector3f &Pos, Map* pMap, Frame* pFrame, const i
     }
     mNormalVector = mWorldPos - Ow;
     mNormalVector = mNormalVector / mNormalVector.norm();
+
+    mTrackCamId = 0;
 
     Eigen::Vector3f PC = mWorldPos - Ow;
     const float dist = PC.norm();
@@ -141,28 +148,27 @@ KeyFrame* MapPoint::GetReferenceKeyFrame()
 void MapPoint::AddObservation(KeyFrame* pKF, int idx)
 {
     unique_lock<mutex> lock(mMutexFeatures);
-    tuple<int,int> indexes;
-
-    if(mObservations.count(pKF)){
+    int nCams = pKF->mnCams > 0 ? pKF->mnCams : ((pKF->NLeft != -1) ? 2 : 1);
+    vector<int> indexes;
+    if(mObservations.count(pKF))
         indexes = mObservations[pKF];
-    }
-    else{
-        indexes = tuple<int,int>(-1,-1);
-    }
-
-    if(pKF -> NLeft != -1 && idx >= pKF -> NLeft){
-        get<1>(indexes) = idx;
-    }
-    else{
-        get<0>(indexes) = idx;
-    }
-
-    mObservations[pKF]=indexes;
-
-    if(!pKF->mpCamera2 && pKF->mvuRight[idx]>=0)
-        nObs+=2;
     else
+        indexes.assign(nCams, -1);
+
+    if((int)indexes.size() < nCams)
+        indexes.resize(nCams, -1);
+
+    int camId = 0;
+    if(!pKF->mvKeyPointCamId.empty())
+        camId = pKF->mvKeyPointCamId[idx];
+    else if(pKF->NLeft != -1 && idx >= pKF->NLeft)
+        camId = 1;
+
+    if(indexes[camId] == -1)
         nObs++;
+
+    indexes[camId] = idx;
+    mObservations[pKF] = indexes;
 }
 
 void MapPoint::EraseObservation(KeyFrame* pKF)
@@ -172,17 +178,11 @@ void MapPoint::EraseObservation(KeyFrame* pKF)
         unique_lock<mutex> lock(mMutexFeatures);
         if(mObservations.count(pKF))
         {
-            tuple<int,int> indexes = mObservations[pKF];
-            int leftIndex = get<0>(indexes), rightIndex = get<1>(indexes);
-
-            if(leftIndex != -1){
-                if(!pKF->mpCamera2 && pKF->mvuRight[leftIndex]>=0)
-                    nObs-=2;
-                else
+            vector<int> indexes = mObservations[pKF];
+            for(int idx : indexes)
+            {
+                if(idx != -1)
                     nObs--;
-            }
-            if(rightIndex != -1){
-                nObs--;
             }
 
             mObservations.erase(pKF);
@@ -201,7 +201,7 @@ void MapPoint::EraseObservation(KeyFrame* pKF)
 }
 
 
-std::map<KeyFrame*, std::tuple<int,int>>  MapPoint::GetObservations()
+std::map<KeyFrame*, std::vector<int>>  MapPoint::GetObservations()
 {
     unique_lock<mutex> lock(mMutexFeatures);
     return mObservations;
@@ -215,7 +215,7 @@ int MapPoint::Observations()
 
 void MapPoint::SetBadFlag()
 {
-    map<KeyFrame*, tuple<int,int>> obs;
+    map<KeyFrame*, vector<int>> obs;
     {
         unique_lock<mutex> lock1(mMutexFeatures);
         unique_lock<mutex> lock2(mMutexPos);
@@ -223,15 +223,14 @@ void MapPoint::SetBadFlag()
         obs = mObservations;
         mObservations.clear();
     }
-    for(map<KeyFrame*, tuple<int,int>>::iterator mit=obs.begin(), mend=obs.end(); mit!=mend; mit++)
+    for(map<KeyFrame*, vector<int>>::iterator mit=obs.begin(), mend=obs.end(); mit!=mend; mit++)
     {
         KeyFrame* pKF = mit->first;
-        int leftIndex = get<0>(mit -> second), rightIndex = get<1>(mit -> second);
-        if(leftIndex != -1){
-            pKF->EraseMapPointMatch(leftIndex);
-        }
-        if(rightIndex != -1){
-            pKF->EraseMapPointMatch(rightIndex);
+        const vector<int> &indexes = mit->second;
+        for(int idx : indexes)
+        {
+            if(idx != -1)
+                pKF->EraseMapPointMatch(idx);
         }
     }
 
@@ -251,7 +250,7 @@ void MapPoint::Replace(MapPoint* pMP)
         return;
 
     int nvisible, nfound;
-    map<KeyFrame*,tuple<int,int>> obs;
+    map<KeyFrame*,vector<int>> obs;
     {
         unique_lock<mutex> lock1(mMutexFeatures);
         unique_lock<mutex> lock2(mMutexPos);
@@ -263,32 +262,29 @@ void MapPoint::Replace(MapPoint* pMP)
         mpReplaced = pMP;
     }
 
-    for(map<KeyFrame*,tuple<int,int>>::iterator mit=obs.begin(), mend=obs.end(); mit!=mend; mit++)
+    for(map<KeyFrame*,vector<int>>::iterator mit=obs.begin(), mend=obs.end(); mit!=mend; mit++)
     {
         // Replace measurement in keyframe
         KeyFrame* pKF = mit->first;
-
-        tuple<int,int> indexes = mit -> second;
-        int leftIndex = get<0>(indexes), rightIndex = get<1>(indexes);
+        const vector<int> &indexes = mit->second;
 
         if(!pMP->IsInKeyFrame(pKF))
         {
-            if(leftIndex != -1){
-                pKF->ReplaceMapPointMatch(leftIndex, pMP);
-                pMP->AddObservation(pKF,leftIndex);
-            }
-            if(rightIndex != -1){
-                pKF->ReplaceMapPointMatch(rightIndex, pMP);
-                pMP->AddObservation(pKF,rightIndex);
+            for(int idx : indexes)
+            {
+                if(idx == -1)
+                    continue;
+                pKF->ReplaceMapPointMatch(idx, pMP);
+                pMP->AddObservation(pKF,idx);
             }
         }
         else
         {
-            if(leftIndex != -1){
-                pKF->EraseMapPointMatch(leftIndex);
-            }
-            if(rightIndex != -1){
-                pKF->EraseMapPointMatch(rightIndex);
+            for(int idx : indexes)
+            {
+                if(idx == -1)
+                    continue;
+                pKF->EraseMapPointMatch(idx);
             }
         }
     }
@@ -331,7 +327,7 @@ void MapPoint::ComputeDistinctiveDescriptors()
     // Retrieve all observed descriptors
     vector<cv::Mat> vDescriptors;
 
-    map<KeyFrame*,tuple<int,int>> observations;
+    map<KeyFrame*,vector<int>> observations;
 
     {
         unique_lock<mutex> lock1(mMutexFeatures);
@@ -345,19 +341,16 @@ void MapPoint::ComputeDistinctiveDescriptors()
 
     vDescriptors.reserve(observations.size());
 
-    for(map<KeyFrame*,tuple<int,int>>::iterator mit=observations.begin(), mend=observations.end(); mit!=mend; mit++)
+    for(map<KeyFrame*,vector<int>>::iterator mit=observations.begin(), mend=observations.end(); mit!=mend; mit++)
     {
         KeyFrame* pKF = mit->first;
 
         if(!pKF->isBad()){
-            tuple<int,int> indexes = mit -> second;
-            int leftIndex = get<0>(indexes), rightIndex = get<1>(indexes);
-
-            if(leftIndex != -1){
-                vDescriptors.push_back(pKF->mDescriptors.row(leftIndex));
-            }
-            if(rightIndex != -1){
-                vDescriptors.push_back(pKF->mDescriptors.row(rightIndex));
+            const vector<int> &indexes = mit->second;
+            for(int idx : indexes)
+            {
+                if(idx != -1)
+                    vDescriptors.push_back(pKF->mDescriptors.row(idx));
             }
         }
     }
@@ -408,13 +401,38 @@ cv::Mat MapPoint::GetDescriptor()
     return mDescriptor.clone();
 }
 
-tuple<int,int> MapPoint::GetIndexInKeyFrame(KeyFrame *pKF)
+vector<int> MapPoint::GetIndexInKeyFrame(KeyFrame *pKF)
 {
     unique_lock<mutex> lock(mMutexFeatures);
     if(mObservations.count(pKF))
         return mObservations[pKF];
     else
-        return tuple<int,int>(-1,-1);
+        return vector<int>();
+}
+
+int MapPoint::GetIndexInKeyFrameCam(KeyFrame* pKF, int camId)
+{
+    unique_lock<mutex> lock(mMutexFeatures);
+    if(!mObservations.count(pKF))
+        return -1;
+    const vector<int> &indexes = mObservations[pKF];
+    if(camId < 0 || camId >= static_cast<int>(indexes.size()))
+        return -1;
+    return indexes[camId];
+}
+
+int MapPoint::GetFirstIndexInKeyFrame(KeyFrame* pKF)
+{
+    unique_lock<mutex> lock(mMutexFeatures);
+    if(!mObservations.count(pKF))
+        return -1;
+    const vector<int> &indexes = mObservations[pKF];
+    for(int idx : indexes)
+    {
+        if(idx != -1)
+            return idx;
+    }
+    return -1;
 }
 
 bool MapPoint::IsInKeyFrame(KeyFrame *pKF)
@@ -425,7 +443,7 @@ bool MapPoint::IsInKeyFrame(KeyFrame *pKF)
 
 void MapPoint::UpdateNormalAndDepth()
 {
-    map<KeyFrame*,tuple<int,int>> observations;
+    map<KeyFrame*,vector<int>> observations;
     KeyFrame* pRefKF;
     Eigen::Vector3f Pos;
     {
@@ -444,21 +462,18 @@ void MapPoint::UpdateNormalAndDepth()
     Eigen::Vector3f normal;
     normal.setZero();
     int n=0;
-    for(map<KeyFrame*,tuple<int,int>>::iterator mit=observations.begin(), mend=observations.end(); mit!=mend; mit++)
+    for(map<KeyFrame*,vector<int>>::iterator mit=observations.begin(), mend=observations.end(); mit!=mend; mit++)
     {
         KeyFrame* pKF = mit->first;
-
-        tuple<int,int> indexes = mit -> second;
-        int leftIndex = get<0>(indexes), rightIndex = get<1>(indexes);
-
-        if(leftIndex != -1){
-            Eigen::Vector3f Owi = pKF->GetCameraCenter();
-            Eigen::Vector3f normali = Pos - Owi;
-            normal = normal + normali / normali.norm();
-            n++;
-        }
-        if(rightIndex != -1){
-            Eigen::Vector3f Owi = pKF->GetRightCameraCenter();
+        const vector<int> &indexes = mit->second;
+        for(size_t camId = 0; camId < indexes.size(); ++camId)
+        {
+            int idx = indexes[camId];
+            if(idx == -1)
+                continue;
+            Sophus::SE3f Tcw_rig = pKF->GetPose();
+            Sophus::SE3f Tcw_cam = pKF->mvTcr[camId] * Tcw_rig;
+            Eigen::Vector3f Owi = Tcw_cam.inverse().translation();
             Eigen::Vector3f normali = Pos - Owi;
             normal = normal + normali / normali.norm();
             n++;
@@ -468,17 +483,20 @@ void MapPoint::UpdateNormalAndDepth()
     Eigen::Vector3f PC = Pos - pRefKF->GetCameraCenter();
     const float dist = PC.norm();
 
-    tuple<int ,int> indexes = observations[pRefKF];
-    int leftIndex = get<0>(indexes), rightIndex = get<1>(indexes);
-    int level;
-    if(pRefKF -> NLeft == -1){
-        level = pRefKF->mvKeysUn[leftIndex].octave;
+    vector<int> indexes = observations[pRefKF];
+    int level = 0;
+    int refIdx = -1;
+    for(int idx : indexes)
+    {
+        if(idx != -1)
+        {
+            refIdx = idx;
+            break;
+        }
     }
-    else if(leftIndex != -1){
-        level = pRefKF -> mvKeys[leftIndex].octave;
-    }
-    else{
-        level = pRefKF -> mvKeysRight[rightIndex - pRefKF -> NLeft].octave;
+    if(refIdx != -1)
+    {
+        level = pRefKF->mvKeysUn[refIdx].octave;
     }
 
     //const int level = pRefKF->mvKeysUn[observations[pRefKF]].octave;
@@ -548,11 +566,10 @@ int MapPoint::PredictScale(const float &currentDist, Frame* pF)
 void MapPoint::PrintObservations()
 {
     cout << "MP_OBS: MP " << mnId << endl;
-    for(map<KeyFrame*,tuple<int,int>>::iterator mit=mObservations.begin(), mend=mObservations.end(); mit!=mend; mit++)
+    for(map<KeyFrame*,vector<int>>::iterator mit=mObservations.begin(), mend=mObservations.end(); mit!=mend; mit++)
     {
         KeyFrame* pKFi = mit->first;
-        tuple<int,int> indexes = mit->second;
-        int leftIndex = get<0>(indexes), rightIndex = get<1>(indexes);
+        const vector<int> &indexes = mit->second;
         cout << "--OBS in KF " << pKFi->mnId << " in map " << pKFi->GetMap()->GetId() << endl;
     }
 }
@@ -575,16 +592,14 @@ void MapPoint::PreSave(set<KeyFrame*>& spKF,set<MapPoint*>& spMP)
     if(mpReplaced && spMP.find(mpReplaced) != spMP.end())
         mBackupReplacedId = mpReplaced->mnId;
 
-    mBackupObservationsId1.clear();
-    mBackupObservationsId2.clear();
+    mBackupObservationsId.clear();
     // Save the id and position in each KF who view it
-    for(std::map<KeyFrame*,std::tuple<int,int> >::const_iterator it = mObservations.begin(), end = mObservations.end(); it != end; ++it)
+    for(std::map<KeyFrame*,std::vector<int> >::const_iterator it = mObservations.begin(), end = mObservations.end(); it != end; ++it)
     {
         KeyFrame* pKFi = it->first;
         if(spKF.find(pKFi) != spKF.end())
         {
-            mBackupObservationsId1[it->first->mnId] = get<0>(it->second);
-            mBackupObservationsId2[it->first->mnId] = get<1>(it->second);
+            mBackupObservationsId[it->first->mnId] = it->second;
         }
         else
         {
@@ -616,19 +631,16 @@ void MapPoint::PostLoad(map<long unsigned int, KeyFrame*>& mpKFid, map<long unsi
 
     mObservations.clear();
 
-    for(map<long unsigned int, int>::const_iterator it = mBackupObservationsId1.begin(), end = mBackupObservationsId1.end(); it != end; ++it)
+    for(map<long unsigned int, vector<int>>::const_iterator it = mBackupObservationsId.begin(), end = mBackupObservationsId.end(); it != end; ++it)
     {
         KeyFrame* pKFi = mpKFid[it->first];
-        map<long unsigned int, int>::const_iterator it2 = mBackupObservationsId2.find(it->first);
-        std::tuple<int, int> indexes = tuple<int,int>(it->second,it2->second);
         if(pKFi)
         {
-           mObservations[pKFi] = indexes;
+           mObservations[pKFi] = it->second;
         }
     }
 
-    mBackupObservationsId1.clear();
-    mBackupObservationsId2.clear();
+    mBackupObservationsId.clear();
 }
 
 } //namespace ORB_SLAM

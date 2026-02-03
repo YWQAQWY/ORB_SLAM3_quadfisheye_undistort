@@ -68,8 +68,15 @@ namespace ORB_SLAM3
                 if(bFactor)
                     r*=th;
 
-                const vector<size_t> vIndices =
-                        F.GetFeaturesInArea(pMP->mTrackProjX,pMP->mTrackProjY,r*F.mvScaleFactors[nPredictedLevel],nPredictedLevel-1,nPredictedLevel);
+                vector<size_t> vIndices;
+                if(F.mnCams > 1 && F.Nleft == -1)
+                {
+                    vIndices = F.GetFeaturesInArea(pMP->mTrackProjX,pMP->mTrackProjY,r*F.mvScaleFactors[nPredictedLevel],nPredictedLevel-1,nPredictedLevel,pMP->mTrackCamId);
+                }
+                else
+                {
+                    vIndices = F.GetFeaturesInArea(pMP->mTrackProjX,pMP->mTrackProjY,r*F.mvScaleFactors[nPredictedLevel],nPredictedLevel-1,nPredictedLevel);
+                }
 
                 if(!vIndices.empty()){
                     const cv::Mat MPdescriptor = pMP->GetDescriptor();

@@ -70,7 +70,7 @@ Camera3.width: 1920
 Camera3.height: 1536
 
 # Extrinsics: 
-Camera0.Tcw: !!opencv-matrix
+Camera0.Twc: !!opencv-matrix
    rows: 4
    cols: 4
    dt: f
@@ -79,7 +79,7 @@ Camera0.Tcw: !!opencv-matrix
             5.95284998e-02,-9.14547980e-01,-4.00072008e-01, 1.10385001e+00,
             0., 0., 0., 1. ]
 
-Camera1.Tcw: !!opencv-matrix
+Camera1.Twc: !!opencv-matrix
    rows: 4
    cols: 4
    dt: f
@@ -88,7 +88,7 @@ Camera1.Tcw: !!opencv-matrix
            -1.96578000e-02,-9.75525022e-01,-2.19007000e-01, 6.62055016e-01,
             0., 0., 0., 1. ]
 
-Camera2.Tcw: !!opencv-matrix
+Camera2.Twc: !!opencv-matrix
    rows: 4
    cols: 4
    dt: f
@@ -97,7 +97,7 @@ Camera2.Tcw: !!opencv-matrix
             3.07867005e-02,-8.97581995e-01,-4.39770997e-01, 1.11561000e+00,
             0., 0., 0., 1. ]
 
-Camera3.Tcw: !!opencv-matrix
+Camera3.Twc: !!opencv-matrix
    rows: 4
    cols: 4
    dt: f

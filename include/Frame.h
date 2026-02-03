@@ -67,6 +67,13 @@ public:
     // Constructor for Monocular cameras.
     Frame(const cv::Mat &imGray, const double &timeStamp, ORBextractor* extractor,ORBVocabulary* voc, GeometricCamera* pCamera, cv::Mat &distCoef, const float &bf, const float &thDepth, Frame* pPrevF = static_cast<Frame*>(NULL), const IMU::Calib &ImuCalib = IMU::Calib());
 
+    // Constructor for multi-camera rigs (cam0 as rig center).
+    Frame(const std::vector<cv::Mat> &images, const double &timeStamp,
+          const std::vector<ORBextractor*> &extractors, ORBVocabulary* voc,
+          const std::vector<GeometricCamera*> &cameras,
+          const std::vector<Sophus::SE3f> &Tcr,
+          const float &bf, const float &thDepth, Frame* pPrevF = static_cast<Frame*>(NULL));
+
     // Destructor
     // ~Frame();
 
@@ -101,6 +108,7 @@ public:
     // Check if a MapPoint is in the frustum of the camera
     // and fill variables of the MapPoint to be used by the tracking
     bool isInFrustum(MapPoint* pMP, float viewingCosLimit);
+    bool isInFrustum(MapPoint* pMP, float viewingCosLimit, int camId);
 
     bool ProjectPointDistort(MapPoint* pMP, cv::Point2f &kp, float &u, float &v);
 
@@ -110,6 +118,7 @@ public:
     bool PosInGrid(const cv::KeyPoint &kp, int &posX, int &posY);
 
     vector<size_t> GetFeaturesInArea(const float &x, const float  &y, const float  &r, const int minLevel=-1, const int maxLevel=-1, const bool bRight = false) const;
+    vector<size_t> GetFeaturesInArea(const float &x, const float  &y, const float  &r, const int minLevel, const int maxLevel, const int camId) const;
 
     // Search a match for each keypoint in the left image to a keypoint in the right image.
     // If there is a match, depth is computed and the right coordinate associated to the left keypoint is stored.
@@ -222,11 +231,17 @@ public:
     // Number of KeyPoints.
     int N;
 
+    // Number of cameras in the rig.
+    int mnCams;
+
     // Vector of keypoints (original for visualization) and undistorted (actually used by the system).
     // In the stereo case, mvKeysUn is redundant as images must be rectified.
     // In the RGB-D case, RGB images can be distorted.
     std::vector<cv::KeyPoint> mvKeys, mvKeysRight;
     std::vector<cv::KeyPoint> mvKeysUn;
+
+    // Camera id per keypoint (rig camera index).
+    std::vector<int> mvKeyPointCamId;
 
     // Corresponding stereo coordinate and depth for each keypoint.
     std::vector<MapPoint*> mvpMapPoints;
@@ -250,6 +265,9 @@ public:
     static float mfGridElementWidthInv;
     static float mfGridElementHeightInv;
     std::vector<std::size_t> mGrid[FRAME_GRID_COLS][FRAME_GRID_ROWS];
+
+    // Grids for additional cameras (cam0 uses mGrid).
+    std::vector<std::vector<std::vector<size_t>>> mvGrids;
 
     IMU::Bias mPredBias;
 
@@ -324,6 +342,9 @@ private:
 
 public:
     GeometricCamera* mpCamera, *mpCamera2;
+
+    std::vector<GeometricCamera*> mvpCameras;
+    std::vector<Sophus::SE3f> mvTcr;
 
     //Number of KeyPoints extracted in the left and right images
     int Nleft, Nright;

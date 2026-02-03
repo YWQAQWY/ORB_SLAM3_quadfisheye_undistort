@@ -87,8 +87,7 @@ class MapPoint
         ar & boost::serialization::make_array(mNormalVector.data(), mNormalVector.size());
         //ar & BOOST_SERIALIZATION_NVP(mBackupObservationsId);
         //ar & mObservations;
-        ar & mBackupObservationsId1;
-        ar & mBackupObservationsId2;
+        ar & mBackupObservationsId;
         serializeMatrix(ar,mDescriptor,version);
         ar & mBackupRefKFId;
         //ar & mnVisible;
@@ -119,13 +118,15 @@ public:
 
     KeyFrame* GetReferenceKeyFrame();
 
-    std::map<KeyFrame*,std::tuple<int,int>> GetObservations();
+    std::map<KeyFrame*,std::vector<int>> GetObservations();
     int Observations();
 
     void AddObservation(KeyFrame* pKF,int idx);
     void EraseObservation(KeyFrame* pKF);
 
-    std::tuple<int,int> GetIndexInKeyFrame(KeyFrame* pKF);
+    std::vector<int> GetIndexInKeyFrame(KeyFrame* pKF);
+    int GetIndexInKeyFrameCam(KeyFrame* pKF, int camId);
+    int GetFirstIndexInKeyFrame(KeyFrame* pKF);
     bool IsInKeyFrame(KeyFrame* pKF);
 
     void SetBadFlag();
@@ -175,6 +176,7 @@ public:
     float mTrackProjXR;
     float mTrackProjYR;
     bool mbTrackInView, mbTrackInViewR;
+    int mTrackCamId;
     int mnTrackScaleLevel, mnTrackScaleLevelR;
     float mTrackViewCos, mTrackViewCosR;
     long unsigned int mnTrackReferenceForFrame;
@@ -213,10 +215,9 @@ protected:
      Eigen::Vector3f mWorldPos;
 
      // Keyframes observing the point and associated index in keyframe
-     std::map<KeyFrame*,std::tuple<int,int> > mObservations;
-     // For save relation without pointer, this is necessary for save/load function
-     std::map<long unsigned int, int> mBackupObservationsId1;
-     std::map<long unsigned int, int> mBackupObservationsId2;
+    std::map<KeyFrame*,std::vector<int> > mObservations;
+    // For save relation without pointer, this is necessary for save/load function
+    std::map<long unsigned int, std::vector<int>> mBackupObservationsId;
 
      // Mean viewing direction
      Eigen::Vector3f mNormalVector;

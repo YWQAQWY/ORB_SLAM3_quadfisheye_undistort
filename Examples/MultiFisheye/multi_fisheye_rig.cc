@@ -488,6 +488,12 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    const int rig_cam_index = 0;
+    if (main_cam_index != rig_cam_index) {
+        cerr << "Rig center is cam0; overriding main_cam_index to 0." << endl;
+        main_cam_index = rig_cam_index;
+    }
+
     vector<FrameEntry> entries;
     if (!LoadAssociation(association_path, entries)) {
         cerr << "Failed to load association file: " << association_path << endl;
@@ -519,14 +525,16 @@ int main(int argc, char **argv)
             cv::ORB::HARRIS_SCORE, 31, orb.iniThFAST);
     }
 
-    Sophus::SE3f T_b_c0 = T_b_c[main_cam_index];
+    Sophus::SE3f T_b_c0 = T_b_c[rig_cam_index];
     Sophus::SE3f T_c0_b = T_b_c0.inverse();
 
+    array<Sophus::SE3f, 4> T_r_c;
+    array<Sophus::SE3f, 4> T_c_r;
     array<Sophus::SE3f, 4> T_ci_c0;
-    array<Sophus::SE3f, 4> T_c_b;
     for (int cam = 0; cam < 4; ++cam) {
-        T_ci_c0[cam] = T_b_c[cam].inverse() * T_b_c0;
-        T_c_b[cam] = T_b_c[cam].inverse();
+        T_r_c[cam] = T_c0_b * T_b_c[cam];
+        T_c_r[cam] = T_r_c[cam].inverse();
+        T_ci_c0[cam] = T_c_r[cam];
     }
 
     array<vector<Eigen::Vector3f>, 4> per_cam_points;
@@ -578,8 +586,8 @@ int main(int argc, char **argv)
             continue;
         }
 
-        Sophus::SE3f T_w_b_raw = Tcw.inverse();
-        Sophus::SE3f T_w_c0_raw = T_w_b_raw * T_c0_b;
+        Sophus::SE3f T_w_r_raw = Tcw.inverse();
+        Sophus::SE3f T_w_c0_raw = T_w_r_raw;
 
         vector<ORB_SLAM3::MapPoint*> map_points_all = SLAM.GetTrackedMapPoints();
         vector<ORB_SLAM3::MapPoint*> map_points;
@@ -607,11 +615,11 @@ int main(int argc, char **argv)
             estimates[cam] = EstimatePosePnP(map_points, map_descriptors, keypoints[cam], descriptors[cam], K[cam]);
         }
 
-        Sophus::SE3f T_w_b = AverageRigPose(estimates, T_c_b, T_w_b_raw);
-        Sophus::SE3f T_w_c0 = T_w_b * T_b_c[main_cam_index];
+        Sophus::SE3f T_w_r = AverageRigPose(estimates, T_c_r, T_w_r_raw);
+        Sophus::SE3f T_w_c0 = T_w_r * T_r_c[rig_cam_index];
 
         for (int cam = 0; cam < 4; ++cam) {
-            Sophus::SE3f T_w_ci = T_w_b * T_b_c[cam];
+            Sophus::SE3f T_w_ci = T_w_r * T_r_c[cam];
             WritePose(traj_files[cam], entries[ni].timestamp, T_w_ci);
         }
 

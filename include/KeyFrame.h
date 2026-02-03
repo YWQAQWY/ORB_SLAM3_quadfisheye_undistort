@@ -259,6 +259,7 @@ public:
 
     // KeyPoint functions
     std::vector<size_t> GetFeaturesInArea(const float &x, const float  &y, const float  &r, const bool bRight = false) const;
+    std::vector<size_t> GetFeaturesInArea(const float &x, const float  &y, const float  &r, const int camId) const;
     bool UnprojectStereo(int i, Eigen::Vector3f &x3D);
 
     // Image
@@ -377,9 +378,13 @@ public:
     // Number of KeyPoints
     const int N;
 
+    // Number of cameras in the rig
+    const int mnCams;
+
     // KeyPoints, stereo coordinate and descriptors (all associated by an index)
     const std::vector<cv::KeyPoint> mvKeys;
     const std::vector<cv::KeyPoint> mvKeysUn;
+    const std::vector<int> mvKeyPointCamId;
     const std::vector<float> mvuRight; // negative value for monocular points
     const std::vector<float> mvDepth; // negative value for monocular points
     const cv::Mat mDescriptors;
@@ -456,6 +461,7 @@ protected:
 
     // Grid over the image to speed up feature matching
     std::vector< std::vector <std::vector<size_t> > > mGrid;
+    std::vector< std::vector <std::vector<size_t> > > mvGrids;
 
     std::map<KeyFrame*,int> mConnectedKeyFrameWeights;
     std::vector<KeyFrame*> mvpOrderedConnectedKeyFrames;
@@ -503,6 +509,8 @@ protected:
 
 public:
     GeometricCamera* mpCamera, *mpCamera2;
+    std::vector<GeometricCamera*> mvpCameras;
+    std::vector<Sophus::SE3f> mvTcr;
 
     //Indexes of stereo observations correspondences
     std::vector<int> mvLeftToRightMatch, mvRightToLeftMatch;
