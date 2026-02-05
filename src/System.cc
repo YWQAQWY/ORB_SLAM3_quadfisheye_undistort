@@ -74,8 +74,16 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
        exit(-1);
     }
 
+    int nCam = 1;
+    cv::FileNode nCamNode = fsSettings["Camera.nCam"];
+    if(!nCamNode.empty() && nCamNode.isInt())
+    {
+        nCam = nCamNode.operator int();
+    }
+
     cv::FileNode node = fsSettings["File.version"];
-    if(!node.empty() && node.isString() && node.string() == "1.0"){
+    const bool useSettings = (!node.empty() && node.isString() && node.string() == "1.0" && nCam <= 1);
+    if(useSettings){
         settings_ = new Settings(strSettingsFile,mSensor);
 
         mStrLoadAtlasFromFile = settings_->atlasLoadFile();
@@ -84,6 +92,12 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
         cout << (*settings_) << endl;
     }
     else{
+        if(!node.empty() && node.isString() && node.string() == "1.0" && nCam > 1)
+        {
+            cout << "Multi-camera rig detected (Camera.nCam=" << nCam
+                 << "), using legacy parameter loader." << endl;
+        }
+
         settings_ = nullptr;
         cv::FileNode node = fsSettings["System.LoadAtlasFromFile"];
         if(!node.empty() && node.isString())
@@ -321,6 +335,7 @@ Sophus::SE3f System::TrackStereo(const cv::Mat &imLeft, const cv::Mat &imRight, 
     mTrackingState = mpTracker->mState;
     mTrackedMapPoints = mpTracker->mCurrentFrame.mvpMapPoints;
     mTrackedKeyPointsUn = mpTracker->mCurrentFrame.mvKeysUn;
+    mTrackedKeyPointCamIds = mpTracker->mCurrentFrame.mvKeyPointCamId;
 
     return Tcw;
 }
@@ -393,6 +408,7 @@ Sophus::SE3f System::TrackRGBD(const cv::Mat &im, const cv::Mat &depthmap, const
     mTrackingState = mpTracker->mState;
     mTrackedMapPoints = mpTracker->mCurrentFrame.mvpMapPoints;
     mTrackedKeyPointsUn = mpTracker->mCurrentFrame.mvKeysUn;
+    mTrackedKeyPointCamIds = mpTracker->mCurrentFrame.mvKeyPointCamId;
     return Tcw;
 }
 
@@ -469,6 +485,7 @@ Sophus::SE3f System::TrackMonocular(const cv::Mat &im, const double &timestamp, 
     mTrackingState = mpTracker->mState;
     mTrackedMapPoints = mpTracker->mCurrentFrame.mvpMapPoints;
     mTrackedKeyPointsUn = mpTracker->mCurrentFrame.mvKeysUn;
+    mTrackedKeyPointCamIds = mpTracker->mCurrentFrame.mvKeyPointCamId;
 
     return Tcw;
 }
@@ -524,6 +541,7 @@ Sophus::SE3f System::TrackMulti(const std::vector<cv::Mat> &images, const double
     mTrackingState = mpTracker->mState;
     mTrackedMapPoints = mpTracker->mCurrentFrame.mvpMapPoints;
     mTrackedKeyPointsUn = mpTracker->mCurrentFrame.mvKeysUn;
+    mTrackedKeyPointCamIds = mpTracker->mCurrentFrame.mvKeyPointCamId;
 
     return Tcw;
 }
@@ -1389,6 +1407,20 @@ vector<cv::KeyPoint> System::GetTrackedKeyPointsUn()
 {
     unique_lock<mutex> lock(mMutexState);
     return mTrackedKeyPointsUn;
+}
+
+vector<int> System::GetTrackedKeyPointCamIds()
+{
+    unique_lock<mutex> lock(mMutexState);
+    return mTrackedKeyPointCamIds;
+}
+
+vector<MapPoint*> System::GetAllMapPoints()
+{
+    unique_lock<mutex> lock(mMutexState);
+    if(!mpAtlas)
+        return {};
+    return mpAtlas->GetAllMapPoints();
 }
 
 double System::GetTimeFromIMUInit()

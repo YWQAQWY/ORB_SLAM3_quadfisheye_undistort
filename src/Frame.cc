@@ -420,9 +420,13 @@ Frame::Frame(const std::vector<cv::Mat> &images, const double &timeStamp,
 {
     mnId=nNextId++;
 
-    mnCams = static_cast<int>(cameras.size());
-    mvpCameras = cameras;
-    mvTcr = Tcr;
+     mnCams = static_cast<int>(cameras.size());
+     mvpCameras = cameras;
+     mvTcr = Tcr;
+     if(!mvpCameras.empty())
+     {
+         mpCamera = mvpCameras[0];
+     }
     mDistCoef = cv::Mat::zeros(4,1,CV_32F);
 
     if(extractors.empty() || images.empty())
@@ -473,6 +477,13 @@ Frame::Frame(const std::vector<cv::Mat> &images, const double &timeStamp,
     mvpMapPoints = vector<MapPoint*>(N,static_cast<MapPoint*>(NULL));
     mvbOutlier = vector<bool>(N,false);
 
+    if(!cameras.empty() && cameras[0]->GetType() == GeometricCamera::CAM_PINHOLE)
+    {
+        Pinhole* pPin = static_cast<Pinhole*>(cameras[0]);
+        mK = pPin->toK();
+        mK_ = pPin->toK_();
+    }
+
     if(mbInitialComputations && !images.empty())
     {
         ComputeImageBounds(images[0]);
@@ -480,11 +491,8 @@ Frame::Frame(const std::vector<cv::Mat> &images, const double &timeStamp,
         mfGridElementWidthInv=static_cast<float>(FRAME_GRID_COLS)/static_cast<float>(mnMaxX-mnMinX);
         mfGridElementHeightInv=static_cast<float>(FRAME_GRID_ROWS)/static_cast<float>(mnMaxY-mnMinY);
 
-        if(!cameras.empty() && cameras[0]->GetType() == GeometricCamera::CAM_PINHOLE)
+        if(!mK.empty())
         {
-            Pinhole* pPin = static_cast<Pinhole*>(cameras[0]);
-            mK = pPin->toK();
-            mK_ = pPin->toK_();
             fx = mK.at<float>(0,0);
             fy = mK.at<float>(1,1);
             cx = mK.at<float>(0,2);

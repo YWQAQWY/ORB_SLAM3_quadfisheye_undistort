@@ -31,6 +31,21 @@
 namespace ORB_SLAM3
 {
 
+namespace
+{
+int FirstValidIndex(const std::vector<int> &indexes)
+{
+    for (int idx : indexes)
+    {
+        if (idx != -1)
+        {
+            return idx;
+        }
+    }
+    return -1;
+}
+}
+
 
 Sim3Solver::Sim3Solver(KeyFrame *pKF1, KeyFrame *pKF2, const vector<MapPoint *> &vpMatched12, const bool bFixScale,
                        vector<KeyFrame*> vpKeyFrameMatchedMP):
@@ -84,8 +99,8 @@ Sim3Solver::Sim3Solver(KeyFrame *pKF1, KeyFrame *pKF2, const vector<MapPoint *> 
             if(bDifferentKFs)
                 pKFm = vpKeyFrameMatchedMP[i1];
 
-            int indexKF1 = get<0>(pMP1->GetIndexInKeyFrame(pKF1));
-            int indexKF2 = get<0>(pMP2->GetIndexInKeyFrame(pKFm));
+            int indexKF1 = FirstValidIndex(pMP1->GetIndexInKeyFrame(pKF1));
+            int indexKF2 = FirstValidIndex(pMP2->GetIndexInKeyFrame(pKFm));
 
             if(indexKF1<0 || indexKF2<0)
                 continue;

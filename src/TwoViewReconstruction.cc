@@ -101,7 +101,7 @@ namespace ORB_SLAM3
         }
 
 
-        // 并行算两种模型（"双管齐下"）
+        // 并行算两种模型
         // Launch threads to compute in parallel a fundamental matrix and a homography
         vector<bool> vbMatchesInliersH, vbMatchesInliersF; // 哪些点符合H/F模型
         float SH, SF;  // H和F的得分（好坏程度）
@@ -118,7 +118,7 @@ namespace ORB_SLAM3
         //选择用哪个模型
         // Compute ratio of scores
         if(SH+SF == 0.f) return false; // all o means failure
-        float RH = SH/(SH+SF);// 算比例：H占多少分？F占多少分？
+        float RH = SH/(SH+SF);// 算比例：H占多少分
 
         std::cout << "[Init] TwoView scores: SH=" << SH
                   << " SF=" << SF

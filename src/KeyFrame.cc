@@ -82,6 +82,11 @@ KeyFrame::KeyFrame(Frame &F, Map *pMap, KeyFrameDatabase *pKFDB):
     mvpCameras = F.mvpCameras;
     mvTcr = F.mvTcr;
 
+    if(!mpCamera && !mvpCameras.empty())
+    {
+        mpCamera = mvpCameras[0];
+    }
+
 
 
     if(!F.HasVelocity()) {
@@ -302,12 +307,16 @@ int KeyFrame::GetNumberMPs()
 void KeyFrame::AddMapPoint(MapPoint *pMP, const size_t &idx)
 {
     unique_lock<mutex> lock(mMutexFeatures);
+    if(idx >= mvpMapPoints.size())
+        return;
     mvpMapPoints[idx]=pMP;
 }
 
 void KeyFrame::EraseMapPointMatch(const int &idx)
 {
     unique_lock<mutex> lock(mMutexFeatures);
+    if(idx < 0 || idx >= static_cast<int>(mvpMapPoints.size()))
+        return;
     mvpMapPoints[idx]=static_cast<MapPoint*>(NULL);
 }
 
@@ -324,6 +333,8 @@ void KeyFrame::EraseMapPointMatch(MapPoint* pMP)
 
 void KeyFrame::ReplaceMapPointMatch(const int &idx, MapPoint* pMP)
 {
+    if(idx < 0 || idx >= static_cast<int>(mvpMapPoints.size()))
+        return;
     mvpMapPoints[idx]=pMP;
 }
 

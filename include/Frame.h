@@ -267,7 +267,7 @@ public:
     std::vector<std::size_t> mGrid[FRAME_GRID_COLS][FRAME_GRID_ROWS];
 
     // Grids for additional cameras (cam0 uses mGrid).
-    std::vector<std::vector<std::vector<size_t>>> mvGrids;
+    std::vector<std::vector<std::vector<std::vector<size_t>>>> mvGrids;
 
     IMU::Bias mPredBias;
 

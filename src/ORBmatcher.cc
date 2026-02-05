@@ -32,6 +32,21 @@ using namespace std;
 namespace ORB_SLAM3
 {
 
+namespace
+{
+int FirstValidIndex(const std::vector<int> &indexes)
+{
+    for (int idx : indexes)
+    {
+        if (idx != -1)
+        {
+            return idx;
+        }
+    }
+    return -1;
+}
+}
+
     const int ORBmatcher::TH_HIGH = 100;
     const int ORBmatcher::TH_LOW = 50;
     const int ORBmatcher::HISTO_LENGTH = 30;
@@ -667,6 +682,11 @@ namespace ORB_SLAM3
 
         for(size_t i1=0, iend1=F1.mvKeysUn.size(); i1<iend1; i1++)
         {
+            if(!F1.mvKeyPointCamId.empty())
+            {
+                if(i1 >= F1.mvKeyPointCamId.size() || F1.mvKeyPointCamId[i1] != 0)
+                    continue;
+            }
             cv::KeyPoint kp1 = F1.mvKeysUn[i1];
             int level1 = kp1.octave;
             if(level1>0)
@@ -917,14 +937,43 @@ namespace ORB_SLAM3
         const DBoW2::FeatureVector &vFeatVec1 = pKF1->mFeatVec;
         const DBoW2::FeatureVector &vFeatVec2 = pKF2->mFeatVec;
 
-        //Compute epipole in second image
+        const bool isMultiCam = (pKF1->mnCams > 1 && pKF1->NLeft == -1 && pKF2->NLeft == -1);
         Sophus::SE3f T1w = pKF1->GetPose();
         Sophus::SE3f T2w = pKF2->GetPose();
         Sophus::SE3f Tw2 = pKF2->GetPoseInverse(); // for convenience
-        Eigen::Vector3f Cw = pKF1->GetCameraCenter();
-        Eigen::Vector3f C2 = T2w * Cw;
-
-        Eigen::Vector2f ep = pKF2->mpCamera->project(C2);
+        Eigen::Vector2f ep(0, 0);
+        vector<Sophus::SE3f> vT12;
+        vector<Eigen::Matrix3f> vR12;
+        vector<Eigen::Vector3f> vt12;
+        vector<Eigen::Vector2f> vEp;
+        if(isMultiCam)
+        {
+            const int nCams = std::min(static_cast<int>(pKF1->mvpCameras.size()), static_cast<int>(pKF2->mvpCameras.size()));
+            vT12.resize(nCams);
+            vR12.resize(nCams);
+            vt12.resize(nCams);
+            vEp.resize(nCams);
+            for(int cam = 0; cam < nCams; ++cam)
+            {
+                if(cam >= static_cast<int>(pKF1->mvTcr.size()) || cam >= static_cast<int>(pKF2->mvTcr.size()))
+                    continue;
+                Sophus::SE3f T1w_cam = pKF1->mvTcr[cam] * pKF1->GetPose();
+                Sophus::SE3f T2w_cam = pKF2->mvTcr[cam] * pKF2->GetPose();
+                Sophus::SE3f Tw2_cam = T2w_cam.inverse();
+                vT12[cam] = T1w_cam * Tw2_cam;
+                vR12[cam] = vT12[cam].rotationMatrix();
+                vt12[cam] = vT12[cam].translation();
+                Eigen::Vector3f Cw_cam = T1w_cam.inverse().translation();
+                Eigen::Vector3f C2_cam = T2w_cam * Cw_cam;
+                vEp[cam] = pKF2->mvpCameras[cam]->project(C2_cam);
+            }
+        }
+        else
+        {
+            Eigen::Vector3f Cw = pKF1->GetCameraCenter();
+            Eigen::Vector3f C2 = T2w * Cw;
+            ep = pKF2->mpCamera->project(C2);
+        }
         Sophus::SE3f T12;
         Sophus::SE3f Tll, Tlr, Trl, Trr;
         Eigen::Matrix3f R12; // for fastest computation
@@ -1023,6 +1072,34 @@ namespace ORB_SLAM3
 
                         if(dist>TH_LOW || dist>bestDist)
                             continue;
+
+                        int camId1 = 0;
+                        int camId2 = 0;
+                        if(isMultiCam)
+                        {
+                            if(!pKF1->mvKeyPointCamId.empty())
+                            {
+                                if(idx1 >= pKF1->mvKeyPointCamId.size())
+                                    continue;
+                                camId1 = pKF1->mvKeyPointCamId[idx1];
+                            }
+                            if(!pKF2->mvKeyPointCamId.empty())
+                            {
+                                if(idx2 >= pKF2->mvKeyPointCamId.size())
+                                    continue;
+                                camId2 = pKF2->mvKeyPointCamId[idx2];
+                            }
+                            if(camId1 != camId2)
+                                continue;
+                            if(camId1 < 0 || camId1 >= static_cast<int>(vT12.size()))
+                                continue;
+                            pCamera1 = pKF1->mvpCameras[camId1];
+                            pCamera2 = pKF2->mvpCameras[camId1];
+                            R12 = vR12[camId1];
+                            t12 = vt12[camId1];
+                            T12 = vT12[camId1];
+                            ep = vEp[camId1];
+                        }
 
                         const cv::KeyPoint &kp2 = (pKF2 -> NLeft == -1) ? pKF2->mvKeysUn[idx2]
                                                                         : (idx2 < pKF2 -> NLeft) ? pKF2 -> mvKeys[idx2]
@@ -1490,7 +1567,8 @@ namespace ORB_SLAM3
             if(pMP)
             {
                 vbAlreadyMatched1[i]=true;
-                int idx2 = get<0>(pMP->GetIndexInKeyFrame(pKF2));
+                const vector<int> indexes2 = pMP->GetIndexInKeyFrame(pKF2);
+                int idx2 = FirstValidIndex(indexes2);
                 if(idx2>=0 && idx2<N2)
                     vbAlreadyMatched2[idx2]=true;
             }

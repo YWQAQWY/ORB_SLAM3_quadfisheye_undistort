@@ -148,7 +148,22 @@ KeyFrame* MapPoint::GetReferenceKeyFrame()
 void MapPoint::AddObservation(KeyFrame* pKF, int idx)
 {
     unique_lock<mutex> lock(mMutexFeatures);
+    if(idx < 0 || idx >= pKF->N)
+        return;
+
+    int camId = 0;
+    if(!pKF->mvKeyPointCamId.empty())
+    {
+        if(idx >= static_cast<int>(pKF->mvKeyPointCamId.size()))
+            return;
+        camId = pKF->mvKeyPointCamId[idx];
+    }
+    else if(pKF->NLeft != -1 && idx >= pKF->NLeft)
+        camId = 1;
+
     int nCams = pKF->mnCams > 0 ? pKF->mnCams : ((pKF->NLeft != -1) ? 2 : 1);
+    if(camId >= nCams)
+        nCams = camId + 1;
     vector<int> indexes;
     if(mObservations.count(pKF))
         indexes = mObservations[pKF];
@@ -157,12 +172,6 @@ void MapPoint::AddObservation(KeyFrame* pKF, int idx)
 
     if((int)indexes.size() < nCams)
         indexes.resize(nCams, -1);
-
-    int camId = 0;
-    if(!pKF->mvKeyPointCamId.empty())
-        camId = pKF->mvKeyPointCamId[idx];
-    else if(pKF->NLeft != -1 && idx >= pKF->NLeft)
-        camId = 1;
 
     if(indexes[camId] == -1)
         nObs++;
@@ -349,8 +358,11 @@ void MapPoint::ComputeDistinctiveDescriptors()
             const vector<int> &indexes = mit->second;
             for(int idx : indexes)
             {
-                if(idx != -1)
-                    vDescriptors.push_back(pKF->mDescriptors.row(idx));
+                if(idx == -1)
+                    continue;
+                if(idx < 0 || idx >= pKF->mDescriptors.rows)
+                    continue;
+                vDescriptors.push_back(pKF->mDescriptors.row(idx));
             }
         }
     }
@@ -466,7 +478,8 @@ void MapPoint::UpdateNormalAndDepth()
     {
         KeyFrame* pKF = mit->first;
         const vector<int> &indexes = mit->second;
-        for(size_t camId = 0; camId < indexes.size(); ++camId)
+        const size_t camLimit = std::min(indexes.size(), pKF->mvTcr.size());
+        for(size_t camId = 0; camId < camLimit; ++camId)
         {
             int idx = indexes[camId];
             if(idx == -1)

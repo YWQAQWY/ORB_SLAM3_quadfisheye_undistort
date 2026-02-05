@@ -787,8 +787,7 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, 
                                     continue;
                                 }
 
-                                tuple<size_t,size_t> indexes = pMPi->GetIndexInKeyFrame(pKFi);
-                                int index = get<0>(indexes);
+                                int index = pMPi->GetFirstIndexInKeyFrame(pKFi);
                                 if(index >= 0)
                                 {
                                     int coord_x = pKFi->mvKeysUn[index].pt.x;
@@ -1195,8 +1194,9 @@ void LoopClosing::CorrectLoop()
     mpLoopMatchedKF->AddLoopEdge(mpCurrentKF);
     mpCurrentKF->AddLoopEdge(mpLoopMatchedKF);
 
+    const bool allowGBA = (mpTracker && mpTracker->GetNumCams() <= 1);
     // Launch a new thread to perform Global Bundle Adjustment (Only if few keyframes, if not it would take too much time)
-    if(!pLoopMap->isImuInitialized() || (pLoopMap->KeyFramesInMap()<200 && mpAtlas->CountMaps()==1))
+    if(allowGBA && (!pLoopMap->isImuInitialized() || (pLoopMap->KeyFramesInMap()<200 && mpAtlas->CountMaps()==1)))
     {
         mbRunningGBA = true;
         mbFinishedGBA = false;
@@ -1760,7 +1760,8 @@ void LoopClosing::MergeLocal()
 
     mpLocalMapper->Release();
 
-    if(bRelaunchBA && (!pCurrentMap->isImuInitialized() || (pCurrentMap->KeyFramesInMap()<200 && mpAtlas->CountMaps()==1)))
+    const bool allowGBA = (mpTracker && mpTracker->GetNumCams() <= 1);
+    if(allowGBA && bRelaunchBA && (!pCurrentMap->isImuInitialized() || (pCurrentMap->KeyFramesInMap()<200 && mpAtlas->CountMaps()==1)))
     {
         // Launch a new thread to perform Global Bundle Adjustment
         mbRunningGBA = true;
@@ -2077,7 +2078,7 @@ void LoopClosing::CheckObservations(set<KeyFrame*> &spKFsMap1, set<KeyFrame*> &s
                 continue;
             }
 
-            map<KeyFrame*, tuple<int,int>> mMPijObs = pMPij->GetObservations();
+            map<KeyFrame*, vector<int>> mMPijObs = pMPij->GetObservations();
             for(KeyFrame* pKFi2 : spKFsMap2)
             {
                 if(mMPijObs.find(pKFi2) != mMPijObs.end())

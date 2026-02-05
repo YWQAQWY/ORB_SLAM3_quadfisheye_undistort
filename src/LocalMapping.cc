@@ -151,7 +151,8 @@ void LocalMapping::Run()
                     }
                     else
                     {
-                        Optimizer::LocalBundleAdjustment(mpCurrentKeyFrame,&mbAbortBA, mpCurrentKeyFrame->GetMap(),num_FixedKF_BA,num_OptKF_BA,num_MPs_BA,num_edges_BA);
+                        const bool onlyCam0 = (mpTracker && mpTracker->GetNumCams() > 1);
+                        Optimizer::LocalBundleAdjustment(mpCurrentKeyFrame,&mbAbortBA, mpCurrentKeyFrame->GetMap(),num_FixedKF_BA,num_OptKF_BA,num_MPs_BA,num_edges_BA, onlyCam0);
                         b_doneLBA = true;
                     }
 
@@ -417,6 +418,14 @@ void LocalMapping::CreateNewMapPoints()
     Eigen::Matrix<float,3,3> Rwc1 = Rcw1.transpose();
     Eigen::Vector3f tcw1 = sophTcw1.translation();
     Eigen::Vector3f Ow1 = mpCurrentKeyFrame->GetCameraCenter();
+    const bool isMultiCam = (mpCurrentKeyFrame->mnCams > 1 && mpCurrentKeyFrame->NLeft == -1);
+    vector<int> vTriangulatedPerCam;
+    vector<int> vCandidatePerCam;
+    if(isMultiCam)
+    {
+        vTriangulatedPerCam.assign(mpCurrentKeyFrame->mnCams, 0);
+        vCandidatePerCam.assign(mpCurrentKeyFrame->mnCams, 0);
+    }
 
     const float &fx1 = mpCurrentKeyFrame->fx;
     const float &fy1 = mpCurrentKeyFrame->fy;
@@ -434,7 +443,7 @@ void LocalMapping::CreateNewMapPoints()
     for(size_t i=0; i<vpNeighKFs.size(); i++)
     {
         if(i>0 && CheckNewKeyFrames())
-            return;
+            goto end_triangulation;
 
         KeyFrame* pKF2 = vpNeighKFs[i];
 
@@ -485,13 +494,23 @@ void LocalMapping::CreateNewMapPoints()
             const int &idx1 = vMatchedIndices[ikp].first;
             const int &idx2 = vMatchedIndices[ikp].second;
 
+            int camCandidate = 0;
+            if(isMultiCam && !mpCurrentKeyFrame->mvKeyPointCamId.empty())
+            {
+                if(idx1 >= static_cast<int>(mpCurrentKeyFrame->mvKeyPointCamId.size()))
+                    continue;
+                camCandidate = mpCurrentKeyFrame->mvKeyPointCamId[idx1];
+                if(camCandidate >= 0 && camCandidate < static_cast<int>(vCandidatePerCam.size()))
+                    vCandidatePerCam[camCandidate]++;
+            }
+
             const cv::KeyPoint &kp1 = (mpCurrentKeyFrame -> NLeft == -1) ? mpCurrentKeyFrame->mvKeysUn[idx1]
                                                                          : (idx1 < mpCurrentKeyFrame -> NLeft) ? mpCurrentKeyFrame -> mvKeys[idx1]
                                                                                                                : mpCurrentKeyFrame -> mvKeysRight[idx1 - mpCurrentKeyFrame -> NLeft];
             const float kp1_ur=mpCurrentKeyFrame->mvuRight[idx1];
             bool bStereo1 = (!mpCurrentKeyFrame->mpCamera2 && kp1_ur>=0);
             const bool bRight1 = (mpCurrentKeyFrame -> NLeft == -1 || idx1 < mpCurrentKeyFrame -> NLeft) ? false
-                                                                                                         : true;
+                                                                                                          : true;
 
             const cv::KeyPoint &kp2 = (pKF2 -> NLeft == -1) ? pKF2->mvKeysUn[idx2]
                                                             : (idx2 < pKF2 -> NLeft) ? pKF2 -> mvKeys[idx2]
@@ -502,7 +521,48 @@ void LocalMapping::CreateNewMapPoints()
             const bool bRight2 = (pKF2 -> NLeft == -1 || idx2 < pKF2 -> NLeft) ? false
                                                                                : true;
 
-            if(mpCurrentKeyFrame->mpCamera2 && pKF2->mpCamera2){
+            if(isMultiCam && pKF2->mnCams > 1 && pKF2->NLeft == -1)
+            {
+                int camId1 = 0;
+                int camId2 = 0;
+                if(!mpCurrentKeyFrame->mvKeyPointCamId.empty())
+                {
+                    if(idx1 >= mpCurrentKeyFrame->mvKeyPointCamId.size())
+                        continue;
+                    camId1 = mpCurrentKeyFrame->mvKeyPointCamId[idx1];
+                }
+                if(!pKF2->mvKeyPointCamId.empty())
+                {
+                    if(idx2 >= pKF2->mvKeyPointCamId.size())
+                        continue;
+                    camId2 = pKF2->mvKeyPointCamId[idx2];
+                }
+                if(camId1 != camId2)
+                    continue;
+                if(camId1 < 0 || camId1 >= mpCurrentKeyFrame->mnCams)
+                    continue;
+                if(camId1 >= static_cast<int>(mpCurrentKeyFrame->mvTcr.size()) || camId1 >= static_cast<int>(pKF2->mvTcr.size()))
+                    continue;
+                if(camId1 >= static_cast<int>(mpCurrentKeyFrame->mvpCameras.size()) || camId1 >= static_cast<int>(pKF2->mvpCameras.size()))
+                    continue;
+
+                sophTcw1 = mpCurrentKeyFrame->mvTcr[camId1] * mpCurrentKeyFrame->GetPose();
+                Ow1 = sophTcw1.inverse().translation();
+                pCamera1 = mpCurrentKeyFrame->mvpCameras[camId1];
+                eigTcw1 = sophTcw1.matrix3x4();
+                Rcw1 = eigTcw1.block<3,3>(0,0);
+                Rwc1 = Rcw1.transpose();
+                tcw1 = sophTcw1.translation();
+
+                sophTcw2 = pKF2->mvTcr[camId1] * pKF2->GetPose();
+                Ow2 = sophTcw2.inverse().translation();
+                pCamera2 = pKF2->mvpCameras[camId1];
+                eigTcw2 = sophTcw2.matrix3x4();
+                Rcw2 = eigTcw2.block<3,3>(0,0);
+                Rwc2 = Rcw2.transpose();
+                tcw2 = sophTcw2.translation();
+            }
+            else if(mpCurrentKeyFrame->mpCamera2 && pKF2->mpCamera2){
                 if(bRight1 && bRight2){
                     sophTcw1 = mpCurrentKeyFrame->GetRightPose();
                     Ow1 = mpCurrentKeyFrame->GetRightCameraCenter();
@@ -692,6 +752,14 @@ void LocalMapping::CreateNewMapPoints()
 
             // Triangulation is succesfull
             MapPoint* pMP = new MapPoint(x3D, mpCurrentKeyFrame, mpAtlas->GetCurrentMap());
+            if(isMultiCam)
+            {
+                int camTri = 0;
+                if(!mpCurrentKeyFrame->mvKeyPointCamId.empty() && idx1 >= 0 && idx1 < static_cast<int>(mpCurrentKeyFrame->mvKeyPointCamId.size()))
+                    camTri = mpCurrentKeyFrame->mvKeyPointCamId[idx1];
+                if(camTri >= 0 && camTri < static_cast<int>(vTriangulatedPerCam.size()))
+                    vTriangulatedPerCam[camTri]++;
+            }
             if (bPointStereo)
                 countStereo++;
             
@@ -709,6 +777,18 @@ void LocalMapping::CreateNewMapPoints()
             mlpRecentAddedMapPoints.push_back(pMP);
         }
     }    
+
+end_triangulation:
+    if(isMultiCam)
+    {
+        std::ostringstream oss;
+        oss << "Multi-cam triangulation counts";
+        for(size_t cam = 0; cam < vTriangulatedPerCam.size(); ++cam)
+        {
+            oss << " cam" << cam << "=" << vTriangulatedPerCam[cam] << "/" << vCandidatePerCam[cam];
+        }
+        Verbose::PrintMess(oss.str(), Verbose::VERBOSITY_NORMAL);
+    }
 }
 
 void LocalMapping::SearchInNeighbors()
@@ -968,19 +1048,29 @@ void LocalMapping::KeyFrameCulling()
                         const int &scaleLevel = (pKF -> NLeft == -1) ? pKF->mvKeysUn[i].octave
                                                                      : (i < pKF -> NLeft) ? pKF -> mvKeys[i].octave
                                                                                           : pKF -> mvKeysRight[i].octave;
-                        const map<KeyFrame*, tuple<int,int>> observations = pMP->GetObservations();
+                        const map<KeyFrame*, vector<int>> observations = pMP->GetObservations();
                         int nObs=0;
-                        for(map<KeyFrame*, tuple<int,int>>::const_iterator mit=observations.begin(), mend=observations.end(); mit!=mend; mit++)
+                        for(map<KeyFrame*, vector<int>>::const_iterator mit=observations.begin(), mend=observations.end(); mit!=mend; mit++)
                         {
                             KeyFrame* pKFi = mit->first;
                             if(pKFi==pKF)
                                 continue;
-                            tuple<int,int> indexes = mit->second;
-                            int leftIndex = get<0>(indexes), rightIndex = get<1>(indexes);
                             int scaleLeveli = -1;
+                            const vector<int> &indexes = mit->second;
+                            int leftIndex = indexes.empty() ? -1 : indexes[0];
+                            int rightIndex = indexes.size() > 1 ? indexes[1] : -1;
                             if(pKFi -> NLeft == -1)
-                                scaleLeveli = pKFi->mvKeysUn[leftIndex].octave;
-                            else {
+                            {
+                                for(int idx : indexes)
+                                {
+                                    if(idx == -1)
+                                        continue;
+                                    int level = pKFi->mvKeysUn[idx].octave;
+                                    scaleLeveli = (scaleLeveli == -1 || scaleLeveli > level) ? level : scaleLeveli;
+                                }
+                            }
+                            else
+                            {
                                 if (leftIndex != -1) {
                                     scaleLeveli = pKFi->mvKeys[leftIndex].octave;
                                 }
@@ -1051,6 +1141,7 @@ void LocalMapping::KeyFrameCulling()
             break;
         }
     }
+
 }
 
 void LocalMapping::RequestReset()

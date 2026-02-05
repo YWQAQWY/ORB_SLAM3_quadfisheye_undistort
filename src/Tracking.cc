@@ -720,11 +720,12 @@ bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
             return false;
 
         Sophus::SE3f T_b_c0 = T_b_c[0];
-        Sophus::SE3f T_c0_b = T_b_c0.inverse();
         mvTcr.resize(nCam);
         for(int cam = 0; cam < nCam; ++cam)
         {
-            mvTcr[cam] = T_c0_b * T_b_c[cam];
+            // Tcr is camera pose in rig (cam0) frame.
+            // Twc in config is rig-from-camera, so invert to get camera-from-rig.
+            mvTcr[cam] = T_b_c[cam].inverse() * T_b_c0;
         }
 
         mpCamera = mvpCameras[0];
@@ -1407,6 +1408,15 @@ bool Tracking::ParseORBParamFile(cv::FileStorage &fSettings)
 
     mpORBextractorLeft = new ORBextractor(nFeatures,fScaleFactor,nLevels,fIniThFAST,fMinThFAST);
 
+    mvpORBextractors.clear();
+    if(mnCams > 1)
+    {
+        for(int cam = 0; cam < mnCams; ++cam)
+        {
+            mvpORBextractors.push_back(new ORBextractor(nFeatures,fScaleFactor,nLevels,fIniThFAST,fMinThFAST));
+        }
+    }
+
     if(mSensor==System::STEREO || mSensor==System::IMU_STEREO)
         mpORBextractorRight = new ORBextractor(nFeatures,fScaleFactor,nLevels,fIniThFAST,fMinThFAST);
 
@@ -1792,6 +1802,7 @@ Sophus::SE3f Tracking::GrabImageMulti(const std::vector<cv::Mat> &images, const 
         Tcr.assign(cameras.size(), Sophus::SE3f());
 
     mCurrentFrame = Frame(gray_images,timestamp,extractors,mpORBVocabulary,cameras,Tcr,mbf,mThDepth,&mLastFrame);
+
 
     if (mState==NO_IMAGES_YET)
         t0=timestamp;
@@ -2772,7 +2783,14 @@ void Tracking::CreateInitialMapMonocular()
 
     // Bundle Adjustment
     Verbose::PrintMess("New Map created with " + to_string(mpAtlas->MapPointsInMap()) + " points", Verbose::VERBOSITY_QUIET);
-    Optimizer::GlobalBundleAdjustemnt(mpAtlas->GetCurrentMap(),20);
+    if(mnCams > 1)
+    {
+        Verbose::PrintMess("Skipping initial Global BA for multi-cam rig", Verbose::VERBOSITY_QUIET);
+    }
+    else
+    {
+        Optimizer::GlobalBundleAdjustemnt(mpAtlas->GetCurrentMap(),20);
+    }
 
     float medianDepth = pKFini->ComputeSceneMedianDepth(2);
     float invMedianDepth;
@@ -2923,10 +2941,12 @@ bool Tracking::TrackReferenceKeyFrame()
     vector<MapPoint*> vpMapPointMatches;
 
     int nmatches = matcher.SearchByBoW(mpReferenceKF,mCurrentFrame,vpMapPointMatches);
+    const bool isMultiCam = (mCurrentFrame.mnCams > 1 && mCurrentFrame.Nleft == -1);
+    const int minRefMatches = isMultiCam ? 4 : 15;
 
-    if(nmatches<15)
+    if(nmatches<minRefMatches)
     {
-        cout << "TRACK_REF_KF: Less than 15 matches!!\n";
+        cout << "TRACK_REF_KF: Less than " << minRefMatches << " matches!!\n";
         return false;
     }
 
@@ -2970,7 +2990,7 @@ bool Tracking::TrackReferenceKeyFrame()
     if (mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
         return true;
     else
-        return nmatchesMap>=10;
+        return nmatchesMap >= (isMultiCam ? 3 : 10);
 }
 
 void Tracking::UpdateLastFrame()
@@ -3222,10 +3242,12 @@ bool Tracking::TrackLocalMap()
     // Decide if the tracking was succesful
     // More restrictive if there was a relocalization recently
     mpLocalMapper->mnMatchesInliers=mnMatchesInliers;
-    if(mCurrentFrame.mnId<mnLastRelocFrameId+mMaxFrames && mnMatchesInliers<50)
+    const bool isMultiCam = (mCurrentFrame.mnCams > 1 && mCurrentFrame.Nleft == -1);
+    const int minRelocInliers = isMultiCam ? 6 : 50;
+    if(mCurrentFrame.mnId<mnLastRelocFrameId+mMaxFrames && mnMatchesInliers<minRelocInliers)
         return false;
 
-    if((mnMatchesInliers>10)&&(mState==RECENTLY_LOST))
+    if((mnMatchesInliers>(isMultiCam ? 6 : 10))&&(mState==RECENTLY_LOST))
         return true;
 
 
@@ -3249,7 +3271,8 @@ bool Tracking::TrackLocalMap()
     }
     else
     {
-        if(mnMatchesInliers<30)
+        const int minInliers = isMultiCam ? 4 : 30;
+        if(mnMatchesInliers<minInliers)
             return false;
         else
             return true;
@@ -3281,6 +3304,7 @@ bool Tracking::NeedNewKeyFrame()
     }
 
     const int nKFs = mpAtlas->KeyFramesInMap();
+    const bool isMultiCam = (mCurrentFrame.mnCams > 1 && mCurrentFrame.Nleft == -1);
 
     // Do not insert keyframes if not enough frames have passed from last relocalisation
     if(mCurrentFrame.mnId<mnLastRelocFrameId+mMaxFrames && nKFs>mMaxFrames)
@@ -3352,9 +3376,11 @@ bool Tracking::NeedNewKeyFrame()
     // Condition 1b: More than "MinFrames" have passed and Local Mapping is idle
     const bool c1b = ((mCurrentFrame.mnId>=mnLastKeyFrameId+mMinFrames) && bLocalMappingIdle); //mpLocalMapper->KeyframesInQueue() < 2);
     //Condition 1c: tracking is weak
-    const bool c1c = mSensor!=System::MONOCULAR && mSensor!=System::IMU_MONOCULAR && mSensor!=System::IMU_STEREO && mSensor!=System::IMU_RGBD && (mnMatchesInliers<nRefMatches*0.25 || bNeedToInsertClose) ;
+    const float weakMatchRatio = isMultiCam ? 0.45f : 0.25f;
+    const bool c1c = mSensor!=System::MONOCULAR && mSensor!=System::IMU_MONOCULAR && mSensor!=System::IMU_STEREO && mSensor!=System::IMU_RGBD && (mnMatchesInliers<nRefMatches*weakMatchRatio || bNeedToInsertClose) ;
     // Condition 2: Few tracked points compared to reference keyframe. Lots of visual odometry compared to map matches.
-    const bool c2 = (((mnMatchesInliers<nRefMatches*thRefRatio || bNeedToInsertClose)) && mnMatchesInliers>15);
+    const int minInliersKF = isMultiCam ? 3 : 15;
+    const bool c2 = (((mnMatchesInliers<nRefMatches*thRefRatio || bNeedToInsertClose)) && mnMatchesInliers>minInliersKF);
 
     //std::cout << "NeedNewKF: c1a=" << c1a << "; c1b=" << c1b << "; c1c=" << c1c << "; c2=" << c2 << std::endl;
     // Temporal condition for Inertial cases
@@ -3687,8 +3713,8 @@ void Tracking::UpdateLocalKeyFrames()
             {
                 if(!pMP->isBad())
                 {
-                    const map<KeyFrame*,tuple<int,int>> observations = pMP->GetObservations();
-                    for(map<KeyFrame*,tuple<int,int>>::const_iterator it=observations.begin(), itend=observations.end(); it!=itend; it++)
+                    const map<KeyFrame*,vector<int>> observations = pMP->GetObservations();
+                    for(map<KeyFrame*,vector<int>>::const_iterator it=observations.begin(), itend=observations.end(); it!=itend; it++)
                         keyframeCounter[it->first]++;
                 }
                 else
@@ -3710,8 +3736,8 @@ void Tracking::UpdateLocalKeyFrames()
                     continue;
                 if(!pMP->isBad())
                 {
-                    const map<KeyFrame*,tuple<int,int>> observations = pMP->GetObservations();
-                    for(map<KeyFrame*,tuple<int,int>>::const_iterator it=observations.begin(), itend=observations.end(); it!=itend; it++)
+                    const map<KeyFrame*,vector<int>> observations = pMP->GetObservations();
+                    for(map<KeyFrame*,vector<int>>::const_iterator it=observations.begin(), itend=observations.end(); it!=itend; it++)
                         keyframeCounter[it->first]++;
                 }
                 else

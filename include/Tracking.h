@@ -102,6 +102,7 @@ public:
     void NewDataset();
     int GetNumberDataset();
     int GetMatchesInliers();
+    int GetNumCams() const { return mnCams; }
 
     //DEBUG
     void SaveSubTrajectory(string strNameFile_frames, string strNameFile_kf, string strFolder="");

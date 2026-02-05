@@ -461,7 +461,7 @@ protected:
 
     // Grid over the image to speed up feature matching
     std::vector< std::vector <std::vector<size_t> > > mGrid;
-    std::vector< std::vector <std::vector<size_t> > > mvGrids;
+    std::vector< std::vector <std::vector<std::vector<size_t> > > > mvGrids;
 
     std::map<KeyFrame*,int> mConnectedKeyFrameWeights;
     std::vector<KeyFrame*> mvpOrderedConnectedKeyFrames;
