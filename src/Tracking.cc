@@ -2062,6 +2062,11 @@ void Tracking::Track()
     }
 
 
+    if(mCurrentFrame.mnId % 50 == 0)
+    {
+        cout << "Processing frame " << mCurrentFrame.mnId << endl;
+    }
+
     if ((mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD) && mpLastKeyFrame)
         mCurrentFrame.SetNewBias(mpLastKeyFrame->GetImuBias());
 
@@ -2448,11 +2453,13 @@ void Tracking::Track()
             std::chrono::steady_clock::time_point time_StartNewKF = std::chrono::steady_clock::now();
 #endif
             bool bNeedKF = NeedNewKeyFrame();
+            const bool isMultiCam = (mCurrentFrame.mnCams > 1 && mCurrentFrame.Nleft == -1);
 
             // Check if we need to insert a new keyframe
             // if(bNeedKF && bOK)
             if(bNeedKF && (bOK || (mInsertKFsLost && mState==RECENTLY_LOST &&
-                                   (mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD))))
+                                   (mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)) ||
+                              (isMultiCam && mState==RECENTLY_LOST)))
                 CreateNewKeyFrame();
 
 #ifdef REGISTER_TIMES
