@@ -40,6 +40,8 @@ using namespace std;
 
 namespace ORB_SLAM3
 {
+namespace {
+}
 
 
 Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer, MapDrawer *pMapDrawer, Atlas *pAtlas, KeyFrameDatabase* pKFDB, const string &strSettingPath, const int sensor, Settings* settings, const string &_nameSeq):
@@ -2204,6 +2206,23 @@ void Tracking::Track()
                     Verbose::PrintMess("Lost for a short time", Verbose::VERBOSITY_NORMAL);
 
                     bOK = true;
+                    int bestCamInliers = 0;
+                    if(mCurrentFrame.mnCams > 1 && mCurrentFrame.Nleft == -1)
+                    {
+                        std::vector<int> perCamInliers(mCurrentFrame.mnCams, 0);
+                        for(int i = 0; i < mCurrentFrame.N; ++i)
+                        {
+                            if(!mCurrentFrame.mvpMapPoints[i] || mCurrentFrame.mvbOutlier[i])
+                                continue;
+                            int camId = 0;
+                            if(!mCurrentFrame.mvKeyPointCamId.empty() && i < static_cast<int>(mCurrentFrame.mvKeyPointCamId.size()))
+                                camId = mCurrentFrame.mvKeyPointCamId[i];
+                            if(camId >= 0 && camId < static_cast<int>(perCamInliers.size()))
+                                perCamInliers[camId]++;
+                        }
+                        for(int count : perCamInliers)
+                            bestCamInliers = std::max(bestCamInliers, count);
+                    }
                     if((mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD))
                     {
                         if(pCurrentMap->isImuInitialized())
@@ -2224,7 +2243,7 @@ void Tracking::Track()
                         bOK = Relocalization();
                         //std::cout << "mCurrentFrame.mTimeStamp:" << to_string(mCurrentFrame.mTimeStamp) << std::endl;
                         //std::cout << "mTimeStampLost:" << to_string(mTimeStampLost) << std::endl;
-                        if(mCurrentFrame.mTimeStamp-mTimeStampLost>5.0f && !bOK)
+                        if(mCurrentFrame.mTimeStamp-mTimeStampLost>3.0f && !bOK && bestCamInliers < 6)
                         {
                             mState = LOST;
                             Verbose::PrintMess("Track Lost...", Verbose::VERBOSITY_NORMAL);
@@ -2379,6 +2398,7 @@ void Tracking::Track()
             if(maxCamInliers >= 6)
                 bOK = true;
         }
+
 
         if(bOK)
             mState = OK;
@@ -3241,8 +3261,9 @@ bool Tracking::TrackLocalMap()
         }
 
     int inliers;
+    const bool isMultiCam = (mCurrentFrame.mnCams > 1 && mCurrentFrame.Nleft == -1);
     if (!mpAtlas->isImuInitialized())
-        Optimizer::PoseOptimization(&mCurrentFrame);
+        inliers = Optimizer::PoseOptimization(&mCurrentFrame);
     else
     {
         if(mCurrentFrame.mnId<=mnLastRelocFrameId+mnFramesToResetIMU)
@@ -3301,7 +3322,6 @@ bool Tracking::TrackLocalMap()
     // Decide if the tracking was succesful
     // More restrictive if there was a relocalization recently
     mpLocalMapper->mnMatchesInliers=mnMatchesInliers;
-    const bool isMultiCam = (mCurrentFrame.mnCams > 1 && mCurrentFrame.Nleft == -1);
     int bestCamInliers = mnMatchesInliers;
     if(isMultiCam)
     {
@@ -3940,11 +3960,13 @@ void Tracking::UpdateLocalKeyFrames()
 bool Tracking::Relocalization()
 {
     Verbose::PrintMess("Starting relocalization", Verbose::VERBOSITY_NORMAL);
-    // Compute Bag of Words Vector
-    mCurrentFrame.ComputeBoW();
+    const bool isMultiCam = (mCurrentFrame.mnCams > 1 && mCurrentFrame.Nleft == -1);
+    const int relocCamId = isMultiCam ? mMainCamIndex : 0;
+    if(isMultiCam)
+        mCurrentFrame.ComputeBoW(relocCamId);
+    else
+        mCurrentFrame.ComputeBoW();
 
-    // Relocalization is performed when tracking is lost
-    // Track Lost: Query KeyFrame Database for keyframe candidates for relocalisation
     vector<KeyFrame*> vpCandidateKFs = mpKeyFrameDB->DetectRelocalizationCandidates(&mCurrentFrame, mpAtlas->GetCurrentMap());
 
     if(vpCandidateKFs.empty()) {
@@ -3954,8 +3976,6 @@ bool Tracking::Relocalization()
 
     const int nKFs = vpCandidateKFs.size();
 
-    // We perform first an ORB matching with each candidate
-    // If enough matches are found we setup a PnP solver
     ORBmatcher matcher(0.75,true);
 
     vector<MLPnPsolver*> vpMLPnPsolvers;
@@ -3977,7 +3997,7 @@ bool Tracking::Relocalization()
         else
         {
             int nmatches = matcher.SearchByBoW(pKF,mCurrentFrame,vvpMapPointMatches[i]);
-            if(nmatches<15)
+            if(nmatches<(isMultiCam ? 10 : 15))
             {
                 vbDiscarded[i] = true;
                 continue;
@@ -3992,8 +4012,6 @@ bool Tracking::Relocalization()
         }
     }
 
-    // Alternatively perform some iterations of P4P RANSAC
-    // Until we found a camera pose supported by enough inliers
     bool bMatch = false;
     ORBmatcher matcher2(0.9,true);
 
@@ -4004,7 +4022,6 @@ bool Tracking::Relocalization()
             if(vbDiscarded[i])
                 continue;
 
-            // Perform 5 Ransac Iterations
             vector<bool> vbInliers;
             int nInliers;
             bool bNoMore;
@@ -4013,19 +4030,16 @@ bool Tracking::Relocalization()
             Eigen::Matrix4f eigTcw;
             bool bTcw = pSolver->iterate(5,bNoMore,vbInliers,nInliers, eigTcw);
 
-            // If Ransac reachs max. iterations discard keyframe
             if(bNoMore)
             {
                 vbDiscarded[i]=true;
                 nCandidates--;
             }
 
-            // If a Camera Pose is computed, optimize
             if(bTcw)
             {
                 Sophus::SE3f Tcw(eigTcw);
                 mCurrentFrame.SetPose(Tcw);
-                // Tcw.copyTo(mCurrentFrame.mTcw);
 
                 set<MapPoint*> sFound;
 
@@ -4044,25 +4058,24 @@ bool Tracking::Relocalization()
 
                 int nGood = Optimizer::PoseOptimization(&mCurrentFrame);
 
-                if(nGood<10)
+                const int minPnPInliers = isMultiCam ? 15 : 10;
+                if(nGood<minPnPInliers)
                     continue;
 
                 for(int io =0; io<mCurrentFrame.N; io++)
                     if(mCurrentFrame.mvbOutlier[io])
                         mCurrentFrame.mvpMapPoints[io]=static_cast<MapPoint*>(NULL);
 
-                // If few inliers, search by projection in a coarse window and optimize again
-                if(nGood<50)
+                const int minRelocInliers = isMultiCam ? 25 : 50;
+                if(nGood<minRelocInliers)
                 {
                     int nadditional =matcher2.SearchByProjection(mCurrentFrame,vpCandidateKFs[i],sFound,10,100);
 
-                    if(nadditional+nGood>=50)
+                    if(nadditional+nGood>=minRelocInliers)
                     {
                         nGood = Optimizer::PoseOptimization(&mCurrentFrame);
 
-                        // If many inliers but still not enough, search by projection again in a narrower window
-                        // the camera has been already optimized with many points
-                        if(nGood>30 && nGood<50)
+                        if(nGood>30 && nGood<minRelocInliers)
                         {
                             sFound.clear();
                             for(int ip =0; ip<mCurrentFrame.N; ip++)
@@ -4070,8 +4083,7 @@ bool Tracking::Relocalization()
                                     sFound.insert(mCurrentFrame.mvpMapPoints[ip]);
                             nadditional =matcher2.SearchByProjection(mCurrentFrame,vpCandidateKFs[i],sFound,3,64);
 
-                            // Final optimization
-                            if(nGood+nadditional>=50)
+                            if(nGood+nadditional>=minRelocInliers)
                             {
                                 nGood = Optimizer::PoseOptimization(&mCurrentFrame);
 
@@ -4083,9 +4095,7 @@ bool Tracking::Relocalization()
                     }
                 }
 
-
-                // If the pose is supported by enough inliers stop ransacs and continue
-                if(nGood>=50)
+                if(nGood>=minRelocInliers)
                 {
                     bMatch = true;
                     break;
@@ -4104,7 +4114,6 @@ bool Tracking::Relocalization()
         cout << "Relocalized!!" << endl;
         return true;
     }
-
 }
 
 void Tracking::Reset(bool bLocMap)

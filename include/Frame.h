@@ -82,6 +82,7 @@ public:
 
     // Compute Bag of Words representation.
     void ComputeBoW();
+    void ComputeBoW(int camId);
 
     // Set the camera pose. (Imu pose is not modified!)
     void SetPose(const Sophus::SE3<float> &Tcw);

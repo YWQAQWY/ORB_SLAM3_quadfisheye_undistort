@@ -1050,6 +1050,33 @@ void Frame::ComputeBoW()
     }
 }
 
+void Frame::ComputeBoW(int camId)
+{
+    if(mvKeyPointCamId.empty())
+    {
+        ComputeBoW();
+        return;
+    }
+
+    vector<cv::Mat> vCurrentDesc;
+    vCurrentDesc.reserve(mDescriptors.rows);
+    for(int i = 0; i < mDescriptors.rows; ++i)
+    {
+        if(i < static_cast<int>(mvKeyPointCamId.size()) && mvKeyPointCamId[i] == camId)
+            vCurrentDesc.push_back(mDescriptors.row(i));
+    }
+
+    if(vCurrentDesc.empty())
+    {
+        ComputeBoW();
+        return;
+    }
+
+    mBowVec.clear();
+    mFeatVec.clear();
+    mpORBvocabulary->transform(vCurrentDesc,mBowVec,mFeatVec,4);
+}
+
 void Frame::UndistortKeyPoints()
 {
     if(mDistCoef.at<float>(0)==0.0)

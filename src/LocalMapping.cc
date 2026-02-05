@@ -467,14 +467,17 @@ void LocalMapping::CreateNewMapPoints()
         {
             const float medianDepthKF2 = pKF2->ComputeSceneMedianDepth(2);
             const float ratioBaselineDepth = baseline/medianDepthKF2;
+            const float minBaselineRatio = isMultiCam ? 0.005f : 0.01f;
 
-            if(ratioBaselineDepth<0.01)
+            if(ratioBaselineDepth<minBaselineRatio)
                 continue;
         }
 
         // Search matches that fullfil epipolar constraint
         vector<pair<size_t,size_t> > vMatchedIndices;
         bool bCoarse = mbInertial && mpTracker->mState==Tracking::RECENTLY_LOST && mpCurrentKeyFrame->GetMap()->GetIniertialBA2();
+        if(isMultiCam)
+            bCoarse = true;
 
         matcher.SearchForTriangulation(mpCurrentKeyFrame,pKF2,vMatchedIndices,false,bCoarse);
 
