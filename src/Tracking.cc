@@ -2224,7 +2224,7 @@ void Tracking::Track()
                         bOK = Relocalization();
                         //std::cout << "mCurrentFrame.mTimeStamp:" << to_string(mCurrentFrame.mTimeStamp) << std::endl;
                         //std::cout << "mTimeStampLost:" << to_string(mTimeStampLost) << std::endl;
-                        if(mCurrentFrame.mTimeStamp-mTimeStampLost>3.0f && !bOK)
+                        if(mCurrentFrame.mTimeStamp-mTimeStampLost>5.0f && !bOK)
                         {
                             mState = LOST;
                             Verbose::PrintMess("Track Lost...", Verbose::VERBOSITY_NORMAL);
@@ -2358,6 +2358,26 @@ void Tracking::Track()
             // the camera we will use the local map again.
             if(bOK && !mbVO)
                 bOK = TrackLocalMap();
+        }
+
+        if(!bOK && mCurrentFrame.mnCams > 1 && mCurrentFrame.Nleft == -1)
+        {
+            std::vector<int> perCamInliers(mCurrentFrame.mnCams, 0);
+            for(int i = 0; i < mCurrentFrame.N; ++i)
+            {
+                if(!mCurrentFrame.mvpMapPoints[i] || mCurrentFrame.mvbOutlier[i])
+                    continue;
+                int camId = 0;
+                if(!mCurrentFrame.mvKeyPointCamId.empty() && i < static_cast<int>(mCurrentFrame.mvKeyPointCamId.size()))
+                    camId = mCurrentFrame.mvKeyPointCamId[i];
+                if(camId >= 0 && camId < static_cast<int>(perCamInliers.size()))
+                    perCamInliers[camId]++;
+            }
+            int maxCamInliers = 0;
+            for(int count : perCamInliers)
+                maxCamInliers = std::max(maxCamInliers, count);
+            if(maxCamInliers >= 6)
+                bOK = true;
         }
 
         if(bOK)
@@ -3282,11 +3302,29 @@ bool Tracking::TrackLocalMap()
     // More restrictive if there was a relocalization recently
     mpLocalMapper->mnMatchesInliers=mnMatchesInliers;
     const bool isMultiCam = (mCurrentFrame.mnCams > 1 && mCurrentFrame.Nleft == -1);
-    const int minRelocInliers = isMultiCam ? 6 : 50;
-    if(mCurrentFrame.mnId<mnLastRelocFrameId+mMaxFrames && mnMatchesInliers<minRelocInliers)
+    int bestCamInliers = mnMatchesInliers;
+    if(isMultiCam)
+    {
+        std::vector<int> perCamInliers(mCurrentFrame.mnCams, 0);
+        for(int i=0; i<mCurrentFrame.N; i++)
+        {
+            if(!mCurrentFrame.mvpMapPoints[i] || mCurrentFrame.mvbOutlier[i])
+                continue;
+            int camId = 0;
+            if(!mCurrentFrame.mvKeyPointCamId.empty() && i < static_cast<int>(mCurrentFrame.mvKeyPointCamId.size()))
+                camId = mCurrentFrame.mvKeyPointCamId[i];
+            if(camId >= 0 && camId < static_cast<int>(perCamInliers.size()))
+                perCamInliers[camId]++;
+        }
+        bestCamInliers = 0;
+        for(int count : perCamInliers)
+            bestCamInliers = std::max(bestCamInliers, count);
+    }
+    const int minRelocInliers = isMultiCam ? 4 : 50;
+    if(mCurrentFrame.mnId<mnLastRelocFrameId+mMaxFrames && bestCamInliers<minRelocInliers)
         return false;
 
-    if((mnMatchesInliers>(isMultiCam ? 6 : 10))&&(mState==RECENTLY_LOST))
+    if((bestCamInliers>(isMultiCam ? 4 : 10))&&(mState==RECENTLY_LOST))
         return true;
 
 
@@ -3310,8 +3348,8 @@ bool Tracking::TrackLocalMap()
     }
     else
     {
-        const int minInliers = isMultiCam ? 4 : 30;
-        if(mnMatchesInliers<minInliers)
+        const int minInliers = isMultiCam ? 3 : 30;
+        if(bestCamInliers<minInliers)
             return false;
         else
             return true;
@@ -3697,10 +3735,10 @@ void Tracking::SearchLocalPoints()
 
         if(mCurrentFrame.mnCams > 1 && mCurrentFrame.Nleft == -1)
         {
-            if(th < 3)
-                th = 3;
+            if(th < 5)
+                th = 5;
             if(mState==LOST || mState==RECENTLY_LOST)
-                th = std::max(th, 20);
+                th = std::max(th, 25);
         }
 
         int matches = matcher.SearchByProjection(mCurrentFrame, mvpLocalMapPoints, th, mpLocalMapper->mbFarPoints, mpLocalMapper->mThFarPoints);

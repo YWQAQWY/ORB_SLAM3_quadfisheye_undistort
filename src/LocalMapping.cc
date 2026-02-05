@@ -355,6 +355,8 @@ void LocalMapping::MapPointCulling()
         nThObs = 2;
     else
         nThObs = 3;
+    if(mpCurrentKeyFrame && mpCurrentKeyFrame->mnCams > 1 && mpCurrentKeyFrame->NLeft == -1)
+        nThObs = 1;
     const int cnThObs = nThObs;
 
     int borrar = mlpRecentAddedMapPoints.size();
@@ -365,7 +367,7 @@ void LocalMapping::MapPointCulling()
 
         if(pMP->isBad())
             lit = mlpRecentAddedMapPoints.erase(lit);
-        else if(pMP->GetFoundRatio()<0.25f)
+        else if(pMP->GetFoundRatio()<0.15f)
         {
             pMP->SetBadFlag();
             lit = mlpRecentAddedMapPoints.erase(lit);
@@ -375,7 +377,7 @@ void LocalMapping::MapPointCulling()
             pMP->SetBadFlag();
             lit = mlpRecentAddedMapPoints.erase(lit);
         }
-        else if(((int)nCurrentKFid-(int)pMP->mnFirstKFid)>=3)
+        else if(((int)nCurrentKFid-(int)pMP->mnFirstKFid)>=5)
             lit = mlpRecentAddedMapPoints.erase(lit);
         else
         {
@@ -393,6 +395,8 @@ void LocalMapping::CreateNewMapPoints()
     // For stereo inertial case
     if(mbMonocular)
         nn=30;
+    if(mpCurrentKeyFrame && mpCurrentKeyFrame->mnCams > 1 && mpCurrentKeyFrame->NLeft == -1)
+        nn = 20;
     vector<KeyFrame*> vpNeighKFs = mpCurrentKeyFrame->GetBestCovisibilityKeyFrames(nn);
 
     if (mbInertial)
@@ -996,9 +1000,9 @@ void LocalMapping::KeyFrameCulling()
 
     float redundant_th;
     if(!mbInertial)
-        redundant_th = 0.9;
+        redundant_th = 0.95;
     else if (mbMonocular)
-        redundant_th = 0.9;
+        redundant_th = 0.95;
     else
         redundant_th = 0.5;
 
