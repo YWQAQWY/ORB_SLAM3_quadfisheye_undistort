@@ -356,7 +356,7 @@ void LocalMapping::MapPointCulling()
     else
         nThObs = 3;
     if(mpCurrentKeyFrame && mpCurrentKeyFrame->mnCams > 1 && mpCurrentKeyFrame->NLeft == -1)
-        nThObs = 1;
+        nThObs = 2;
     const int cnThObs = nThObs;
 
     int borrar = mlpRecentAddedMapPoints.size();
@@ -367,7 +367,7 @@ void LocalMapping::MapPointCulling()
 
         if(pMP->isBad())
             lit = mlpRecentAddedMapPoints.erase(lit);
-        else if(pMP->GetFoundRatio()<0.15f)
+        else if(pMP->GetFoundRatio()<0.20f)
         {
             pMP->SetBadFlag();
             lit = mlpRecentAddedMapPoints.erase(lit);
@@ -377,7 +377,7 @@ void LocalMapping::MapPointCulling()
             pMP->SetBadFlag();
             lit = mlpRecentAddedMapPoints.erase(lit);
         }
-        else if(((int)nCurrentKFid-(int)pMP->mnFirstKFid)>=5)
+        else if(((int)nCurrentKFid-(int)pMP->mnFirstKFid)>=4)
             lit = mlpRecentAddedMapPoints.erase(lit);
         else
         {
