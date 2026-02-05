@@ -546,6 +546,12 @@ Sophus::SE3f System::TrackMulti(const std::vector<cv::Mat> &images, const double
     return Tcw;
 }
 
+void System::SetMainCamIndex(int camIndex)
+{
+    if(mpTracker)
+        mpTracker->SetMainCamIndex(camIndex);
+}
+
 
 
 void System::ActivateLocalizationMode()

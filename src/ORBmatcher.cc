@@ -667,8 +667,8 @@ int FirstValidIndex(const std::vector<int> &indexes)
         return nmatches;
     }
 
-    int ORBmatcher::SearchForInitialization(Frame &F1, Frame &F2, vector<cv::Point2f> &vbPrevMatched, vector<int> &vnMatches12, int windowSize)
-    {
+int ORBmatcher::SearchForInitialization(Frame &F1, Frame &F2, vector<cv::Point2f> &vbPrevMatched, vector<int> &vnMatches12, int windowSize, int mainCamId)
+{
         int nmatches=0;
         vnMatches12 = vector<int>(F1.mvKeysUn.size(),-1);
 
@@ -680,19 +680,23 @@ int FirstValidIndex(const std::vector<int> &indexes)
         vector<int> vMatchedDistance(F2.mvKeysUn.size(),INT_MAX);
         vector<int> vnMatches21(F2.mvKeysUn.size(),-1);
 
-        for(size_t i1=0, iend1=F1.mvKeysUn.size(); i1<iend1; i1++)
+    for(size_t i1=0, iend1=F1.mvKeysUn.size(); i1<iend1; i1++)
+    {
+        if(!F1.mvKeyPointCamId.empty())
         {
-            if(!F1.mvKeyPointCamId.empty())
-            {
-                if(i1 >= F1.mvKeyPointCamId.size() || F1.mvKeyPointCamId[i1] != 0)
-                    continue;
-            }
+            if(i1 >= F1.mvKeyPointCamId.size() || F1.mvKeyPointCamId[i1] != mainCamId)
+                continue;
+        }
             cv::KeyPoint kp1 = F1.mvKeysUn[i1];
             int level1 = kp1.octave;
             if(level1>0)
                 continue;
 
-            vector<size_t> vIndices2 = F2.GetFeaturesInArea(vbPrevMatched[i1].x,vbPrevMatched[i1].y, windowSize,level1,level1);
+        vector<size_t> vIndices2;
+        if(!F2.mvKeyPointCamId.empty())
+            vIndices2 = F2.GetFeaturesInArea(vbPrevMatched[i1].x,vbPrevMatched[i1].y, windowSize,level1,level1, mainCamId);
+        else
+            vIndices2 = F2.GetFeaturesInArea(vbPrevMatched[i1].x,vbPrevMatched[i1].y, windowSize,level1,level1);
 
             if(vIndices2.empty())
                 continue;
@@ -705,7 +709,13 @@ int FirstValidIndex(const std::vector<int> &indexes)
 
             for(vector<size_t>::iterator vit=vIndices2.begin(); vit!=vIndices2.end(); vit++)
             {
-                size_t i2 = *vit;
+            size_t i2 = *vit;
+
+            if(!F2.mvKeyPointCamId.empty())
+            {
+                if(i2 >= F2.mvKeyPointCamId.size() || F2.mvKeyPointCamId[i2] != mainCamId)
+                    continue;
+            }
 
                 cv::Mat d2 = F2.mDescriptors.row(i2);
 

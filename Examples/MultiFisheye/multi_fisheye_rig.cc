@@ -169,11 +169,9 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    cout << "Main camera index for initialization: " << main_cam_index << endl;
+
     const int rig_cam_index = 0;
-    if (main_cam_index != rig_cam_index) {
-        cerr << "Rig center is cam0; overriding main_cam_index to 0." << endl;
-        main_cam_index = rig_cam_index;
-    }
 
     vector<FrameEntry> entries;
     if (!LoadAssociation(association_path, entries)) {
@@ -188,6 +186,7 @@ int main(int argc, char **argv)
     }
 
     ORB_SLAM3::System SLAM(vocab_path, settings_path, ORB_SLAM3::System::MONOCULAR, true);
+    SLAM.SetMainCamIndex(main_cam_index);
     //ORB_SLAM3::System SLAM(vocab_path, settings_path, ORB_SLAM3::System::MONOCULAR, true);
     float imageScale = SLAM.GetImageScale();
 

@@ -103,6 +103,7 @@ public:
     int GetNumberDataset();
     int GetMatchesInliers();
     int GetNumCams() const { return mnCams; }
+    void SetMainCamIndex(int camIndex);
 
     //DEBUG
     void SaveSubTrajectory(string strNameFile_frames, string strNameFile_kf, string strFolder="");
@@ -354,6 +355,7 @@ protected:
     GeometricCamera* mpCamera, *mpCamera2;
 
     int mnCams = 1;
+    int mMainCamIndex = 0;
     std::vector<GeometricCamera*> mvpCameras;
     std::vector<Sophus::SE3f> mvTcr;
     std::vector<ORBextractor*> mvpORBextractors;

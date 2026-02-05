@@ -123,6 +123,9 @@ public:
     // Process a synchronized multi-camera frame (cam0 is the rig center).
     Sophus::SE3f TrackMulti(const std::vector<cv::Mat> &images, const double &timestamp, string filename="");
 
+    // Select main camera index for monocular initialization in multi-cam rigs.
+    void SetMainCamIndex(int camIndex);
+
 
     // This stops local mapping thread (map building) and performs only camera tracking.
     void ActivateLocalizationMode();

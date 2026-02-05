@@ -639,8 +639,11 @@ void LocalMapping::CreateNewMapPoints()
 
             bool goodProj = false;
             bool bPointStereo = false;
+            float minParallaxCos = mbInertial ? 0.9996f : 0.9998f;
+            if(isMultiCam)
+                minParallaxCos = 0.99995f;
             if(cosParallaxRays<cosParallaxStereo && cosParallaxRays>0 && (bStereo1 || bStereo2 ||
-                                                                          (cosParallaxRays<0.9996 && mbInertial) || (cosParallaxRays<0.9998 && !mbInertial)))
+                                                                          (cosParallaxRays<minParallaxCos)))
             {
                 goodProj = GeometricTools::Triangulate(xn1, xn2, eigTcw1, eigTcw2, x3D);
                 if(!goodProj)
@@ -684,13 +687,15 @@ void LocalMapping::CreateNewMapPoints()
             const float y1 = Rcw1.row(1).dot(x3D)+tcw1(1);
             const float invz1 = 1.0/z1;
 
+            const float reprojChi2 = isMultiCam ? 7.815f : 5.991f;
+            const float reprojChi2Stereo = isMultiCam ? 10.0f : 7.8f;
             if(!bStereo1)
             {
                 cv::Point2f uv1 = pCamera1->project(cv::Point3f(x1,y1,z1));
                 float errX1 = uv1.x - kp1.pt.x;
                 float errY1 = uv1.y - kp1.pt.y;
 
-                if((errX1*errX1+errY1*errY1)>5.991*sigmaSquare1)
+                if((errX1*errX1+errY1*errY1)>reprojChi2*sigmaSquare1)
                     continue;
 
             }
@@ -702,7 +707,7 @@ void LocalMapping::CreateNewMapPoints()
                 float errX1 = u1 - kp1.pt.x;
                 float errY1 = v1 - kp1.pt.y;
                 float errX1_r = u1_r - kp1_ur;
-                if((errX1*errX1+errY1*errY1+errX1_r*errX1_r)>7.8*sigmaSquare1)
+                if((errX1*errX1+errY1*errY1+errX1_r*errX1_r)>reprojChi2Stereo*sigmaSquare1)
                     continue;
             }
 
@@ -716,7 +721,7 @@ void LocalMapping::CreateNewMapPoints()
                 cv::Point2f uv2 = pCamera2->project(cv::Point3f(x2,y2,z2));
                 float errX2 = uv2.x - kp2.pt.x;
                 float errY2 = uv2.y - kp2.pt.y;
-                if((errX2*errX2+errY2*errY2)>5.991*sigmaSquare2)
+                if((errX2*errX2+errY2*errY2)>reprojChi2*sigmaSquare2)
                     continue;
             }
             else
@@ -727,7 +732,7 @@ void LocalMapping::CreateNewMapPoints()
                 float errX2 = u2 - kp2.pt.x;
                 float errY2 = v2 - kp2.pt.y;
                 float errX2_r = u2_r - kp2_ur;
-                if((errX2*errX2+errY2*errY2+errX2_r*errX2_r)>7.8*sigmaSquare2)
+                if((errX2*errX2+errY2*errY2+errX2_r*errX2_r)>reprojChi2Stereo*sigmaSquare2)
                     continue;
             }
 

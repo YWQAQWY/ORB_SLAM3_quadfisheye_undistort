@@ -131,6 +131,16 @@ Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer,
 #endif
 }
 
+void Tracking::SetMainCamIndex(int camIndex)
+{
+    if(camIndex < 0)
+        camIndex = 0;
+    if(mnCams > 0 && camIndex >= mnCams)
+        camIndex = 0;
+    mMainCamIndex = camIndex;
+    cout << "Main camera for initialization: " << mMainCamIndex << endl;
+}
+
 #ifdef REGISTER_TIMES
 double calcAverage(vector<double> v_times)
 {
@@ -2661,10 +2671,29 @@ void Tracking::StereoInitialization()
 void Tracking::MonocularInitialization()
 {
 
+    const bool isMultiCam = (mCurrentFrame.mnCams > 1 && mCurrentFrame.Nleft == -1);
+    int initCamId = isMultiCam ? mMainCamIndex : 0;
+    if(isMultiCam && initCamId >= mCurrentFrame.mnCams)
+        initCamId = 0;
+    auto countKeypointsForCam = [](const Frame &frame, int camId) -> int
+    {
+        if(frame.mvKeyPointCamId.empty())
+            return static_cast<int>(frame.mvKeys.size());
+        int count = 0;
+        for(size_t i = 0; i < frame.mvKeyPointCamId.size(); ++i)
+        {
+            if(frame.mvKeyPointCamId[i] == camId)
+                ++count;
+        }
+        return count;
+    };
+    const int currentCamKeypoints = isMultiCam ? countKeypointsForCam(mCurrentFrame, initCamId)
+                                               : static_cast<int>(mCurrentFrame.mvKeys.size());
+
     if(!mbReadyToInitializate)
     {
         // Set Reference Frame
-        if(mCurrentFrame.mvKeys.size()>100)
+        if(currentCamKeypoints>100)
         {
 
             mInitialFrame = Frame(mCurrentFrame);
@@ -2693,7 +2722,7 @@ void Tracking::MonocularInitialization()
     }
     else
     {
-        if (((int)mCurrentFrame.mvKeys.size()<=100)||((mSensor == System::IMU_MONOCULAR)&&(mLastFrame.mTimeStamp-mInitialFrame.mTimeStamp>1.0)))
+        if ((currentCamKeypoints<=100)||((mSensor == System::IMU_MONOCULAR)&&(mLastFrame.mTimeStamp-mInitialFrame.mTimeStamp>1.0)))
         {
             mbReadyToInitializate = false;
 
@@ -2702,7 +2731,7 @@ void Tracking::MonocularInitialization()
 
         // Find correspondences
         ORBmatcher matcher(0.9,true);
-        int nmatches = matcher.SearchForInitialization(mInitialFrame,mCurrentFrame,mvbPrevMatched,mvIniMatches,100);
+        int nmatches = matcher.SearchForInitialization(mInitialFrame,mCurrentFrame,mvbPrevMatched,mvIniMatches,100,initCamId);
 
         // Check if there are enough correspondences
         if(nmatches<100)
@@ -2714,7 +2743,10 @@ void Tracking::MonocularInitialization()
         Sophus::SE3f Tcw;
         vector<bool> vbTriangulated; // Triangulated Correspondences (mvIniMatches)
 
-        if(mpCamera->ReconstructWithTwoViews(mInitialFrame.mvKeysUn,mCurrentFrame.mvKeysUn,mvIniMatches,Tcw,mvIniP3D,vbTriangulated))
+        GeometricCamera* pInitCamera = mpCamera;
+        if(isMultiCam && initCamId < static_cast<int>(mCurrentFrame.mvpCameras.size()) && mCurrentFrame.mvpCameras[initCamId])
+            pInitCamera = mCurrentFrame.mvpCameras[initCamId];
+        if(pInitCamera->ReconstructWithTwoViews(mInitialFrame.mvKeysUn,mCurrentFrame.mvKeysUn,mvIniMatches,Tcw,mvIniP3D,vbTriangulated))
         {
             for(size_t i=0, iend=mvIniMatches.size(); i<iend;i++)
             {
@@ -3662,6 +3694,14 @@ void Tracking::SearchLocalPoints()
 
         if(mState==LOST || mState==RECENTLY_LOST) // Lost for less than 1 second
             th=15; // 15
+
+        if(mCurrentFrame.mnCams > 1 && mCurrentFrame.Nleft == -1)
+        {
+            if(th < 3)
+                th = 3;
+            if(mState==LOST || mState==RECENTLY_LOST)
+                th = std::max(th, 20);
+        }
 
         int matches = matcher.SearchByProjection(mCurrentFrame, mvpLocalMapPoints, th, mpLocalMapper->mbFarPoints, mpLocalMapper->mThFarPoints);
     }
