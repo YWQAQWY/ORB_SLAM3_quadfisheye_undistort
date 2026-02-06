@@ -21,6 +21,7 @@
 
 
 #include <complex>
+#include <cmath>
 
 #include <Eigen/StdVector>
 #include <Eigen/Dense>
@@ -93,6 +94,19 @@ cv::KeyPoint KeyPointForCam(KeyFrame *pKF, int index, int camId)
         return pKF->mvKeysRight[rightIndex];
     }
     return pKF->mvKeysUn[index];
+}
+
+bool GetCamWeight(KeyFrame *pKF, int camId, float &weight)
+{
+    weight = 1.0f;
+    if (pKF->mnCams > 1 && pKF->NLeft == -1)
+    {
+        if (camId < static_cast<int>(pKF->mvCamUsable.size()) && !pKF->mvCamUsable[camId])
+            return false;
+        if (camId < static_cast<int>(pKF->mvCamWeights.size()))
+            weight = pKF->mvCamWeights[camId];
+    }
+    return true;
 }
 }
 
@@ -224,6 +238,10 @@ void Optimizer::BundleAdjustment(const vector<KeyFrame *> &vpKFs, const vector<M
                     camId = pKF->mvKeyPointCamId[idx];
                 }
 
+                float camWeight = 1.0f;
+                if(!GetCamWeight(pKF, camId, camWeight))
+                    continue;
+
                 if(camId == 0 && pKF->mvuRight[idx] >= 0)
                 {
                     const cv::KeyPoint &kpUn = pKF->mvKeysUn[idx];
@@ -237,7 +255,8 @@ void Optimizer::BundleAdjustment(const vector<KeyFrame *> &vpKFs, const vector<M
                     e->setVertex(0, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(id)));
                     e->setVertex(1, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(pKF->mnId)));
                     e->setMeasurement(obs);
-                    const float &invSigma2 = pKF->mvInvLevelSigma2[kpUn.octave];
+                    float invSigma2 = pKF->mvInvLevelSigma2[kpUn.octave];
+                    invSigma2 *= camWeight;
                     Eigen::Matrix3d Info = Eigen::Matrix3d::Identity()*invSigma2;
                     e->setInformation(Info);
 
@@ -245,7 +264,7 @@ void Optimizer::BundleAdjustment(const vector<KeyFrame *> &vpKFs, const vector<M
                     {
                         g2o::RobustKernelHuber* rk = new g2o::RobustKernelHuber;
                         e->setRobustKernel(rk);
-                        rk->setDelta(thHuber3D);
+                        rk->setDelta(thHuber3D * std::sqrt(camWeight));
                     }
 
                     e->fx = pKF->fx;
@@ -272,12 +291,13 @@ void Optimizer::BundleAdjustment(const vector<KeyFrame *> &vpKFs, const vector<M
                     e->setVertex(0, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(id)));
                     e->setVertex(1, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(pKF->mnId)));
                     e->setMeasurement(obs);
-                    const float &invSigma2 = pKF->mvInvLevelSigma2[kp.octave];
+                    float invSigma2 = pKF->mvInvLevelSigma2[kp.octave];
+                    invSigma2 *= camWeight;
                     e->setInformation(Eigen::Matrix2d::Identity()*invSigma2);
 
                     g2o::RobustKernelHuber* rk = new g2o::RobustKernelHuber;
                     e->setRobustKernel(rk);
-                    rk->setDelta(thHuber2D);
+                    rk->setDelta(thHuber2D * std::sqrt(camWeight));
 
                     Sophus::SE3f Trl = pKF-> GetRelativePoseTrl();
                     e->mTrl = g2o::SE3Quat(Trl.unit_quaternion().cast<double>(), Trl.translation().cast<double>());
@@ -302,14 +322,15 @@ void Optimizer::BundleAdjustment(const vector<KeyFrame *> &vpKFs, const vector<M
                     e->setVertex(0, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(id)));
                     e->setVertex(1, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(pKF->mnId)));
                     e->setMeasurement(obs);
-                    const float &invSigma2 = pKF->mvInvLevelSigma2[kpUn.octave];
+                    float invSigma2 = pKF->mvInvLevelSigma2[kpUn.octave];
+                    invSigma2 *= camWeight;
                     e->setInformation(Eigen::Matrix2d::Identity()*invSigma2);
 
                     if(bRobust)
                     {
                         g2o::RobustKernelHuber* rk = new g2o::RobustKernelHuber;
                         e->setRobustKernel(rk);
-                        rk->setDelta(thHuber2D);
+                        rk->setDelta(thHuber2D * std::sqrt(camWeight));
                     }
 
                     if(!pKF->mvpCameras.empty() && camId < static_cast<int>(pKF->mvpCameras.size()))
@@ -917,6 +938,11 @@ void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const l
 
 int Optimizer::PoseOptimization(Frame *pFrame)
 {
+    return PoseOptimization(pFrame, nullptr, nullptr, 1.0f);
+}
+
+int Optimizer::PoseOptimization(Frame *pFrame, const std::vector<unsigned char>* pCamUsable, const std::vector<float>* pCamWeights, float robustScale)
+{
     if(pFrame->mnCams > 1 && pFrame->Nleft == -1)
     {
         g2o::SparseOptimizer optimizer;
@@ -951,6 +977,8 @@ int Optimizer::PoseOptimization(Frame *pFrame)
                 int camId = 0;
                 if(!pFrame->mvKeyPointCamId.empty())
                     camId = pFrame->mvKeyPointCamId[i];
+                if(pCamUsable && camId < static_cast<int>(pCamUsable->size()) && !(*pCamUsable)[camId])
+                    continue;
 
                 Eigen::Matrix<double,2,1> obs;
                 obs << kpUn.pt.x, kpUn.pt.y;
@@ -960,12 +988,17 @@ int Optimizer::PoseOptimization(Frame *pFrame)
                 e->setMeasurement(obs);
 
                 const float unc2 = pFrame->mvpCameras[camId]->uncertainty2(obs);
-                const float invSigma2 = pFrame->mvInvLevelSigma2[kpUn.octave] / unc2;
+                float invSigma2 = pFrame->mvInvLevelSigma2[kpUn.octave] / unc2;
+                float weight = 1.0f;
+                if(pCamWeights && camId < static_cast<int>(pCamWeights->size()))
+                    weight = (*pCamWeights)[camId];
+                invSigma2 *= weight;
                 e->setInformation(Eigen::Matrix2d::Identity()*invSigma2);
 
                 g2o::RobustKernelHuber* rk = new g2o::RobustKernelHuber;
                 e->setRobustKernel(rk);
-                rk->setDelta(deltaMono);
+                float scaledDelta = deltaMono * robustScale * std::sqrt(weight);
+                rk->setDelta(scaledDelta);
 
                 optimizer.addEdge(e);
                 vpEdgesMono.push_back(e);
@@ -1541,8 +1574,14 @@ void Optimizer::LocalBundleAdjustment(KeyFrame *pKF, bool* pbStopFlag, Map* pMap
                 int camId = CamIdFromIndex(pKFi, index);
                 if(camId < 0 || (pKFi->mnCams > 0 && camId >= pKFi->mnCams))
                     continue;
-                if(pKFi->mnCams > 1 && pKFi->NLeft == -1 && camId != 0)
-                    continue;
+                float camWeight = 1.0f;
+                if(pKFi->mnCams > 1 && pKFi->NLeft == -1)
+                {
+                    if(camId < static_cast<int>(pKFi->mvCamUsable.size()) && !pKFi->mvCamUsable[camId])
+                        continue;
+                    if(camId < static_cast<int>(pKFi->mvCamWeights.size()))
+                        camWeight = pKFi->mvCamWeights[camId];
+                }
 
                 // Monocular observation
                 if(camId == 0 && leftIndex != -1 && pKFi->mvuRight[leftIndex] < 0)
@@ -1558,12 +1597,13 @@ void Optimizer::LocalBundleAdjustment(KeyFrame *pKF, bool* pbStopFlag, Map* pMap
                     e->setVertex(0, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(id)));
                     e->setVertex(1, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(pKFi->mnId)));
                     e->setMeasurement(obs);
-                    const float &invSigma2 = pKFi->mvInvLevelSigma2[kpUn.octave];
+                    float invSigma2 = pKFi->mvInvLevelSigma2[kpUn.octave];
+                    invSigma2 *= camWeight;
                     e->setInformation(Eigen::Matrix2d::Identity()*invSigma2);
 
                     g2o::RobustKernelHuber* rk = new g2o::RobustKernelHuber;
                     e->setRobustKernel(rk);
-                    rk->setDelta(thHuberMono);
+                    rk->setDelta(thHuberMono * std::sqrt(camWeight));
 
                     e->pCamera = pKFi->mpCamera;
 
@@ -1588,13 +1628,14 @@ void Optimizer::LocalBundleAdjustment(KeyFrame *pKF, bool* pbStopFlag, Map* pMap
                     e->setVertex(0, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(id)));
                     e->setVertex(1, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(pKFi->mnId)));
                     e->setMeasurement(obs);
-                    const float &invSigma2 = pKFi->mvInvLevelSigma2[kpUn.octave];
+                    float invSigma2 = pKFi->mvInvLevelSigma2[kpUn.octave];
+                    invSigma2 *= camWeight;
                     Eigen::Matrix3d Info = Eigen::Matrix3d::Identity()*invSigma2;
                     e->setInformation(Info);
 
                     g2o::RobustKernelHuber* rk = new g2o::RobustKernelHuber;
                     e->setRobustKernel(rk);
-                    rk->setDelta(thHuberStereo);
+                    rk->setDelta(thHuberStereo * std::sqrt(camWeight));
 
                     e->fx = pKFi->fx;
                     e->fy = pKFi->fy;
@@ -1623,12 +1664,13 @@ void Optimizer::LocalBundleAdjustment(KeyFrame *pKF, bool* pbStopFlag, Map* pMap
                     e->setVertex(0, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(id)));
                     e->setVertex(1, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(pKFi->mnId)));
                     e->setMeasurement(obs);
-                    const float &invSigma2 = pKFi->mvInvLevelSigma2[kpUn.octave];
+                    float invSigma2 = pKFi->mvInvLevelSigma2[kpUn.octave];
+                    invSigma2 *= camWeight;
                     e->setInformation(Eigen::Matrix2d::Identity()*invSigma2);
 
                     g2o::RobustKernelHuber* rk = new g2o::RobustKernelHuber;
                     e->setRobustKernel(rk);
-                    rk->setDelta(thHuberMono);
+                    rk->setDelta(thHuberMono * std::sqrt(camWeight));
 
                     if(!pKFi->mvpCameras.empty() && camId < static_cast<int>(pKFi->mvpCameras.size()))
                         e->pCamera = pKFi->mvpCameras[camId];
@@ -1658,12 +1700,13 @@ void Optimizer::LocalBundleAdjustment(KeyFrame *pKF, bool* pbStopFlag, Map* pMap
                         e->setVertex(0, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(id)));
                         e->setVertex(1, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(pKFi->mnId)));
                         e->setMeasurement(obs);
-                        const float &invSigma2 = pKFi->mvInvLevelSigma2[kp.octave];
+                        float invSigma2 = pKFi->mvInvLevelSigma2[kp.octave];
+                        invSigma2 *= camWeight;
                         e->setInformation(Eigen::Matrix2d::Identity()*invSigma2);
 
                         g2o::RobustKernelHuber* rk = new g2o::RobustKernelHuber;
                         e->setRobustKernel(rk);
-                        rk->setDelta(thHuberMono);
+                        rk->setDelta(thHuberMono * std::sqrt(camWeight));
 
                         Sophus::SE3f Trl = pKFi-> GetRelativePoseTrl();
                         e->mTrl = g2o::SE3Quat(Trl.unit_quaternion().cast<double>(), Trl.translation().cast<double>());
@@ -4705,6 +4748,10 @@ void Optimizer::MergeInertialBA(KeyFrame* pCurrKF, KeyFrame* pMergeKF, bool *pbS
                 int camId = CamIdFromIndex(pKFi, index);
                 const cv::KeyPoint kpUn = (camId == 0 && leftIndex != -1) ? pKFi->mvKeysUn[leftIndex] : KeyPointForCam(pKFi, index, camId);
 
+                float camWeight = 1.0f;
+                if(!GetCamWeight(pKFi, camId, camWeight))
+                    continue;
+
                 if(camId == 0 && leftIndex != -1 && pKFi->mvuRight[leftIndex] < 0) // Monocular observation
                 {
                     Eigen::Matrix<double,2,1> obs;
@@ -4714,12 +4761,13 @@ void Optimizer::MergeInertialBA(KeyFrame* pCurrKF, KeyFrame* pMergeKF, bool *pbS
                     e->setVertex(0, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(id)));
                     e->setVertex(1, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(pKFi->mnId)));
                     e->setMeasurement(obs);
-                    const float &invSigma2 = pKFi->mvInvLevelSigma2[kpUn.octave];
+                    float invSigma2 = pKFi->mvInvLevelSigma2[kpUn.octave];
+                    invSigma2 *= camWeight;
                     e->setInformation(Eigen::Matrix2d::Identity()*invSigma2);
 
                     g2o::RobustKernelHuber* rk = new g2o::RobustKernelHuber;
                     e->setRobustKernel(rk);
-                    rk->setDelta(thHuberMono);
+                    rk->setDelta(thHuberMono * std::sqrt(camWeight));
                     optimizer.addEdge(e);
                     vpEdgesMono.push_back(e);
                     vpEdgeKFMono.push_back(pKFi);
@@ -4736,12 +4784,13 @@ void Optimizer::MergeInertialBA(KeyFrame* pCurrKF, KeyFrame* pMergeKF, bool *pbS
                     e->setVertex(0, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(id)));
                     e->setVertex(1, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(pKFi->mnId)));
                     e->setMeasurement(obs);
-                    const float &invSigma2 = pKFi->mvInvLevelSigma2[kpUn.octave];
+                    float invSigma2 = pKFi->mvInvLevelSigma2[kpUn.octave];
+                    invSigma2 *= camWeight;
                     e->setInformation(Eigen::Matrix3d::Identity()*invSigma2);
 
                     g2o::RobustKernelHuber* rk = new g2o::RobustKernelHuber;
                     e->setRobustKernel(rk);
-                    rk->setDelta(thHuberStereo);
+                    rk->setDelta(thHuberStereo * std::sqrt(camWeight));
 
                     optimizer.addEdge(e);
                     vpEdgesStereo.push_back(e);
@@ -4757,12 +4806,13 @@ void Optimizer::MergeInertialBA(KeyFrame* pCurrKF, KeyFrame* pMergeKF, bool *pbS
                     e->setVertex(0, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(id)));
                     e->setVertex(1, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(pKFi->mnId)));
                     e->setMeasurement(obs);
-                    const float &invSigma2 = pKFi->mvInvLevelSigma2[kpUn.octave];
+                    float invSigma2 = pKFi->mvInvLevelSigma2[kpUn.octave];
+                    invSigma2 *= camWeight;
                     e->setInformation(Eigen::Matrix2d::Identity()*invSigma2);
 
                     g2o::RobustKernelHuber* rk = new g2o::RobustKernelHuber;
                     e->setRobustKernel(rk);
-                    rk->setDelta(thHuberMono);
+                    rk->setDelta(thHuberMono * std::sqrt(camWeight));
                     optimizer.addEdge(e);
                     vpEdgesMono.push_back(e);
                     vpEdgeKFMono.push_back(pKFi);

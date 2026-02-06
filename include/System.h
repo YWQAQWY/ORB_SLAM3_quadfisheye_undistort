@@ -120,11 +120,15 @@ public:
     // Returns the camera pose (empty if tracking fails).
     Sophus::SE3f TrackMonocular(const cv::Mat &im, const double &timestamp, const vector<IMU::Point>& vImuMeas = vector<IMU::Point>(), string filename="");
 
-    // Process a synchronized multi-camera frame (cam0 is the rig center).
+    // Process a synchronized multi-camera frame (rig center set by config).
     Sophus::SE3f TrackMulti(const std::vector<cv::Mat> &images, const double &timestamp, string filename="");
 
-    // Select main camera index for monocular initialization in multi-cam rigs.
+    // Select rig main camera index for multi-cam rigs.
     void SetMainCamIndex(int camIndex);
+    // Select initialization camera index for multi-cam rigs.
+    void SetInitCamIndex(int camIndex);
+    const std::vector<Eigen::Vector3f>& GetRigPointCloud();
+    const std::vector<Eigen::Vector3f>& GetRigFramePoints();
 
 
     // This stops local mapping thread (map building) and performs only camera tracking.

@@ -194,6 +194,8 @@ class KeyFrame
 
 public:
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+
+    ORBVocabulary* GetVocabulary() const { return mpORBvocabulary; }
     KeyFrame();
     KeyFrame(Frame &F, Map* pMap, KeyFrameDatabase* pKFDB);
 
@@ -388,6 +390,12 @@ public:
     const std::vector<float> mvuRight; // negative value for monocular points
     const std::vector<float> mvDepth; // negative value for monocular points
     const cv::Mat mDescriptors;
+
+    // Rig-centric multi-camera gating state
+    const int mnMainCamIndex;
+    std::vector<unsigned char> mvCamUsable;
+    std::vector<float> mvCamWeights;
+    std::vector<int> mvBowIndexToKeyId;
 
     //BoW
     DBoW2::BowVector mBowVec;

@@ -31,6 +31,9 @@
 
 #include <iostream>
 #include <opencv2/core/eigen.hpp>
+#include <algorithm>
+#include <cctype>
+#include <cmath>
 
 #include <mutex>
 #include <chrono>
@@ -41,6 +44,130 @@ using namespace std;
 namespace ORB_SLAM3
 {
 namespace {
+std::string ToLower(std::string value)
+{
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return value;
+}
+
+int NormalizeCamIndex(int camIndex, int nCam)
+{
+    if(camIndex < 0)
+        return 0;
+    if(nCam > 0 && camIndex >= nCam)
+        return 0;
+    return camIndex;
+}
+
+int ParseRigCamIndex(cv::FileStorage &fSettings, const std::string &key, int nCam, int defaultIndex, bool *wasSet)
+{
+    if(wasSet)
+        *wasSet = false;
+    cv::FileNode node = fSettings[key];
+    if(node.empty())
+        return defaultIndex;
+    if(wasSet)
+        *wasSet = true;
+    if(node.isInt())
+        return NormalizeCamIndex(node.operator int(), nCam);
+    if(node.isString())
+    {
+        std::string value = ToLower(node.string());
+        if(value == "front")
+            return NormalizeCamIndex(1, nCam);
+        if(value == "left")
+            return NormalizeCamIndex(0, nCam);
+        if(value == "right")
+            return NormalizeCamIndex(2, nCam);
+        if(value == "rear")
+            return NormalizeCamIndex(3, nCam);
+        try
+        {
+            return NormalizeCamIndex(std::stoi(value), nCam);
+        }
+        catch(const std::exception &)
+        {
+            return defaultIndex;
+        }
+    }
+    return defaultIndex;
+}
+
+cv::Mat BuildDescriptorSubset(const cv::Mat &descriptors, const std::vector<int> &indices)
+{
+    if(descriptors.empty() || indices.empty())
+        return cv::Mat();
+    cv::Mat subset(static_cast<int>(indices.size()), descriptors.cols, descriptors.type());
+    for(size_t i = 0; i < indices.size(); ++i)
+    {
+        descriptors.row(indices[i]).copyTo(subset.row(static_cast<int>(i)));
+    }
+    return subset;
+}
+
+int CountFrameInliersForCam(const Frame &frame, int camId, bool requireObservation)
+{
+    int count = 0;
+    for(int i = 0; i < frame.N; ++i)
+    {
+        if(!frame.mvpMapPoints[i] || frame.mvbOutlier[i])
+            continue;
+        if(requireObservation && frame.mvpMapPoints[i]->Observations() <= 0)
+            continue;
+        int keyCamId = 0;
+        if(!frame.mvKeyPointCamId.empty() && i < static_cast<int>(frame.mvKeyPointCamId.size()))
+            keyCamId = frame.mvKeyPointCamId[i];
+        if(frame.mvKeyPointCamId.empty() && camId != 0)
+            continue;
+        if(keyCamId == camId)
+            count++;
+    }
+    return count;
+}
+
+bool ReadRigIntVector(const cv::FileNode &node, int nCam, int defaultValue, std::vector<int> &values)
+{
+    if(node.empty())
+        return false;
+    values.assign(nCam, defaultValue);
+    if(node.isInt())
+    {
+        int val = node.operator int();
+        std::fill(values.begin(), values.end(), val);
+        return true;
+    }
+    if(node.isSeq())
+    {
+        int idx = 0;
+        for(auto it = node.begin(); it != node.end() && idx < nCam; ++it, ++idx)
+            values[idx] = (*it).operator int();
+        return true;
+    }
+    return false;
+}
+
+bool ReadRigFloatVector(const cv::FileNode &node, int nCam, float defaultValue, std::vector<float> &values)
+{
+    if(node.empty())
+        return false;
+    values.assign(nCam, defaultValue);
+    if(node.isReal() || node.isInt())
+    {
+        float val = node.real();
+        std::fill(values.begin(), values.end(), val);
+        return true;
+    }
+    if(node.isSeq())
+    {
+        int idx = 0;
+        for(auto it = node.begin(); it != node.end() && idx < nCam; ++it, ++idx)
+            values[idx] = static_cast<float>((*it).real());
+        return true;
+    }
+    return false;
+}
 }
 
 
@@ -135,12 +262,34 @@ Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer,
 
 void Tracking::SetMainCamIndex(int camIndex)
 {
-    if(camIndex < 0)
-        camIndex = 0;
-    if(mnCams > 0 && camIndex >= mnCams)
-        camIndex = 0;
-    mMainCamIndex = camIndex;
-    cout << "Main camera for initialization: " << mMainCamIndex << endl;
+    mMainCamIndex = NormalizeCamIndex(camIndex, mnCams);
+    if(!mbInitCamIndexExplicit)
+        mInitCamIndex = mMainCamIndex;
+    if(mnCams > 1 && !mvTcr.empty() && mMainCamIndex < static_cast<int>(mvTcr.size()))
+    {
+        Sophus::SE3f T_cmain_r0 = mvTcr[mMainCamIndex];
+        Sophus::SE3f T_r0_r1 = T_cmain_r0.inverse();
+        for(size_t cam = 0; cam < mvTcr.size(); ++cam)
+            mvTcr[cam] = mvTcr[cam] * T_r0_r1;
+    }
+    if(!mvpCameras.empty() && mMainCamIndex < static_cast<int>(mvpCameras.size()))
+    {
+        mpCamera = mvpCameras[mMainCamIndex];
+        if(mpCamera && mpCamera->GetType() == GeometricCamera::CAM_PINHOLE)
+        {
+            Pinhole* pPin = static_cast<Pinhole*>(mpCamera);
+            mK = pPin->toK();
+            mK_ = pPin->toK_();
+        }
+    }
+    cout << "Rig main camera index: " << mMainCamIndex << endl;
+}
+
+void Tracking::SetInitCamIndex(int camIndex)
+{
+    mInitCamIndex = NormalizeCamIndex(camIndex, mnCams);
+    mbInitCamIndexExplicit = true;
+    cout << "Rig init camera index: " << mInitCamIndex << endl;
 }
 
 #ifdef REGISTER_TIMES
@@ -663,6 +812,18 @@ bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
         mvpCameras.clear();
         mvTcr.clear();
 
+        bool mainCamSet = false;
+        bool initCamSet = false;
+        int mainCamIndex = ParseRigCamIndex(fSettings, "Rig.main_cam", nCam, 0, &mainCamSet);
+        if(!mainCamSet)
+            mainCamIndex = ParseRigCamIndex(fSettings, "Rig.cam_main", nCam, mainCamIndex, &mainCamSet);
+        int initCamIndex = ParseRigCamIndex(fSettings, "Rig.init_cam", nCam, mainCamIndex, &initCamSet);
+        if(!initCamSet)
+            initCamIndex = ParseRigCamIndex(fSettings, "Rig.cam_init", nCam, initCamIndex, &initCamSet);
+        mMainCamIndex = mainCamIndex;
+        mInitCamIndex = initCamSet ? initCamIndex : mainCamIndex;
+        mbInitCamIndexExplicit = initCamSet;
+
         std::vector<Sophus::SE3f> T_b_c(nCam);
         for(int cam = 0; cam < nCam; ++cam)
         {
@@ -731,16 +892,20 @@ bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
         if(b_miss_params)
             return false;
 
-        Sophus::SE3f T_b_c0 = T_b_c[0];
+        mMainCamIndex = NormalizeCamIndex(mMainCamIndex, nCam);
+        mInitCamIndex = NormalizeCamIndex(mInitCamIndex, nCam);
+        if(!mbInitCamIndexExplicit)
+            mInitCamIndex = mMainCamIndex;
+        Sophus::SE3f T_b_c0 = T_b_c[mMainCamIndex];
         mvTcr.resize(nCam);
         for(int cam = 0; cam < nCam; ++cam)
         {
-            // Tcr is camera pose in rig (cam0) frame.
+            // Tcr is camera pose in rig (main cam) frame.
             // Twc in config is rig-from-camera, so invert to get camera-from-rig.
             mvTcr[cam] = T_b_c[cam].inverse() * T_b_c0;
         }
 
-        mpCamera = mvpCameras[0];
+        mpCamera = mvpCameras[mMainCamIndex];
         mpCamera2 = nullptr;
 
         if(mpCamera->GetType() == GeometricCamera::CAM_PINHOLE)
@@ -749,6 +914,8 @@ bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
             mK = pPin->toK();
             mK_ = pPin->toK_();
         }
+
+        InitRigGating(fSettings);
 
         return true;
     }
@@ -1352,6 +1519,33 @@ bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
     return true;
 }
 
+void Tracking::InitRigGating(cv::FileStorage &fSettings)
+{
+    mvGateMinInliers.assign(mnCams, 15);
+    mvGateMaxReproj.assign(mnCams, 5.0f);
+    cv::FileNode node = fSettings["Rig.gate_inliers"];
+    ReadRigIntVector(node, mnCams, 15, mvGateMinInliers);
+    node = fSettings["Rig.gate_reproj"];
+    ReadRigFloatVector(node, mnCams, 5.0f, mvGateMaxReproj);
+
+    node = fSettings["Rig.gate_delta"];
+    if(!node.empty())
+        mGateDelta = static_cast<float>(node.real());
+    node = fSettings["Rig.gate_ref_inliers"];
+    if(!node.empty())
+        mGateRefInliers = static_cast<float>(node.real());
+    node = fSettings["Rig.gate_min_weight"];
+    if(!node.empty())
+        mGateMinWeight = static_cast<float>(node.real());
+    node = fSettings["Rig.gate_robust_scale"];
+    if(!node.empty())
+        mGateRobustScale = static_cast<float>(node.real());
+
+    node = fSettings["Rig.init_grace_frames"];
+    if(!node.empty())
+        mRigInitGraceFrames = node.operator int();
+}
+
 bool Tracking::ParseORBParamFile(cv::FileStorage &fSettings)
 {
     bool b_miss_params = false;
@@ -1712,6 +1906,11 @@ Sophus::SE3f Tracking::GrabImageRGBD(const cv::Mat &imRGB,const cv::Mat &imD, co
 
 Sophus::SE3f Tracking::GrabImageMonocular(const cv::Mat &im, const double &timestamp, string filename)
 {
+    return GrabImageMonocularForCam(im, timestamp, filename, 0);
+}
+
+Sophus::SE3f Tracking::GrabImageMonocularForCam(const cv::Mat &im, const double &timestamp, string filename, int camId)
+{
     mImGray = im;
     if(mImGray.channels()==3)
     {
@@ -1728,25 +1927,51 @@ Sophus::SE3f Tracking::GrabImageMonocular(const cv::Mat &im, const double &times
             cvtColor(mImGray,mImGray,cv::COLOR_BGRA2GRAY);
     }
 
+    if(mImageScale != 1.f)
+    {
+        int width = static_cast<int>(mImGray.cols * mImageScale);
+        int height = static_cast<int>(mImGray.rows * mImageScale);
+        cv::resize(mImGray, mImGray, cv::Size(width, height));
+    }
+
+    GeometricCamera* pCam = mpCamera;
+    if(!mvpCameras.empty() && camId >= 0 && camId < static_cast<int>(mvpCameras.size()))
+        pCam = mvpCameras[camId];
+
     if (mSensor == System::MONOCULAR)
     {
         if(mState==NOT_INITIALIZED || mState==NO_IMAGES_YET ||(lastID - initID) < mMaxFrames)
-            mCurrentFrame = Frame(mImGray,timestamp,mpIniORBextractor,mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth);
+            mCurrentFrame = Frame(mImGray,timestamp,mpIniORBextractor,mpORBVocabulary,pCam,mDistCoef,mbf,mThDepth);
         else
-            mCurrentFrame = Frame(mImGray,timestamp,mpORBextractorLeft,mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth);
+            mCurrentFrame = Frame(mImGray,timestamp,mpORBextractorLeft,mpORBVocabulary,pCam,mDistCoef,mbf,mThDepth);
     }
     else if(mSensor == System::IMU_MONOCULAR)
     {
         if(mState==NOT_INITIALIZED || mState==NO_IMAGES_YET)
         {
-            mCurrentFrame = Frame(mImGray,timestamp,mpIniORBextractor,mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth,&mLastFrame,*mpImuCalib);
+            mCurrentFrame = Frame(mImGray,timestamp,mpIniORBextractor,mpORBVocabulary,pCam,mDistCoef,mbf,mThDepth,&mLastFrame,*mpImuCalib);
         }
         else
-            mCurrentFrame = Frame(mImGray,timestamp,mpORBextractorLeft,mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth,&mLastFrame,*mpImuCalib);
+            mCurrentFrame = Frame(mImGray,timestamp,mpORBextractorLeft,mpORBVocabulary,pCam,mDistCoef,mbf,mThDepth,&mLastFrame,*mpImuCalib);
     }
+
+    mCurrentFrame.mnMainCamIndex = mMainCamIndex;
 
     if (mState==NO_IMAGES_YET)
         t0=timestamp;
+
+    if(mnCams > 1 && !mvpCameras.empty())
+    {
+        mCurrentFrame.mnCams = mnCams;
+        mCurrentFrame.mvpCameras = mvpCameras;
+        mCurrentFrame.mvTcr = mvTcr;
+        mCurrentFrame.mnMainCamIndex = mMainCamIndex;
+        if(!mCurrentFrame.mvKeyPointCamId.empty())
+            mCurrentFrame.mvKeyPointCamId.assign(mCurrentFrame.mvKeyPointCamId.size(), camId);
+        mCurrentFrame.mvCamUsable.assign(mnCams, 1);
+        mCurrentFrame.mvCamWeights.assign(mnCams, 1.0f);
+        mCurrentFrame.SetMainCamera(camId, mImGray);
+    }
 
     mCurrentFrame.mNameFile = filename;
     mCurrentFrame.mnDataset = mnNumDataset;
@@ -1768,7 +1993,8 @@ Sophus::SE3f Tracking::GrabImageMulti(const std::vector<cv::Mat> &images, const 
 
     if(mState==NOT_INITIALIZED || mState==NO_IMAGES_YET)
     {
-        return GrabImageMonocular(images[0], timestamp, filename);
+        int initCamId = NormalizeCamIndex(mInitCamIndex, static_cast<int>(images.size()));
+        return GrabImageMonocularForCam(images[initCamId], timestamp, filename, initCamId);
     }
 
     std::vector<cv::Mat> gray_images;
@@ -1814,6 +2040,7 @@ Sophus::SE3f Tracking::GrabImageMulti(const std::vector<cv::Mat> &images, const 
         Tcr.assign(cameras.size(), Sophus::SE3f());
 
     mCurrentFrame = Frame(gray_images,timestamp,extractors,mpORBVocabulary,cameras,Tcr,mbf,mThDepth,&mLastFrame);
+    mCurrentFrame.SetMainCamera(mMainCamIndex, gray_images[NormalizeCamIndex(mMainCamIndex, static_cast<int>(gray_images.size()))]);
 
 
     if (mState==NO_IMAGES_YET)
@@ -2209,19 +2436,7 @@ void Tracking::Track()
                     int bestCamInliers = 0;
                     if(mCurrentFrame.mnCams > 1 && mCurrentFrame.Nleft == -1)
                     {
-                        std::vector<int> perCamInliers(mCurrentFrame.mnCams, 0);
-                        for(int i = 0; i < mCurrentFrame.N; ++i)
-                        {
-                            if(!mCurrentFrame.mvpMapPoints[i] || mCurrentFrame.mvbOutlier[i])
-                                continue;
-                            int camId = 0;
-                            if(!mCurrentFrame.mvKeyPointCamId.empty() && i < static_cast<int>(mCurrentFrame.mvKeyPointCamId.size()))
-                                camId = mCurrentFrame.mvKeyPointCamId[i];
-                            if(camId >= 0 && camId < static_cast<int>(perCamInliers.size()))
-                                perCamInliers[camId]++;
-                        }
-                        for(int count : perCamInliers)
-                            bestCamInliers = std::max(bestCamInliers, count);
+                        bestCamInliers = CountFrameInliersForCam(mCurrentFrame, mMainCamIndex, false);
                     }
                     if((mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD))
                     {
@@ -2360,14 +2575,16 @@ void Tracking::Track()
         std::chrono::steady_clock::time_point time_StartLMTrack = std::chrono::steady_clock::now();
 #endif
         // If we have an initial estimation of the camera pose and matching. Track the local map.
+        const bool isMultiCam = (mCurrentFrame.mnCams > 1 && mCurrentFrame.Nleft == -1);
+        const bool skipLocalMap = false;
         if(!mbOnlyTracking)
         {
-            if(bOK)
+            if(bOK && !skipLocalMap)
             {
                 bOK = TrackLocalMap();
 
             }
-            if(!bOK)
+            if(!bOK && !skipLocalMap)
                 cout << "Fail to track local map!" << endl;
         }
         else
@@ -2376,27 +2593,22 @@ void Tracking::Track()
             // a local map and therefore we do not perform TrackLocalMap(). Once the system relocalizes
             // the camera we will use the local map again.
             if(bOK && !mbVO)
-                bOK = TrackLocalMap();
+            {
+                if(!skipLocalMap)
+                    bOK = TrackLocalMap();
+            }
         }
 
         if(!bOK && mCurrentFrame.mnCams > 1 && mCurrentFrame.Nleft == -1)
         {
-            std::vector<int> perCamInliers(mCurrentFrame.mnCams, 0);
-            for(int i = 0; i < mCurrentFrame.N; ++i)
-            {
-                if(!mCurrentFrame.mvpMapPoints[i] || mCurrentFrame.mvbOutlier[i])
-                    continue;
-                int camId = 0;
-                if(!mCurrentFrame.mvKeyPointCamId.empty() && i < static_cast<int>(mCurrentFrame.mvKeyPointCamId.size()))
-                    camId = mCurrentFrame.mvKeyPointCamId[i];
-                if(camId >= 0 && camId < static_cast<int>(perCamInliers.size()))
-                    perCamInliers[camId]++;
-            }
-            int maxCamInliers = 0;
-            for(int count : perCamInliers)
-                maxCamInliers = std::max(maxCamInliers, count);
-            if(maxCamInliers >= 6)
+            int mainCamInliers = CountFrameInliersForCam(mCurrentFrame, mMainCamIndex, false);
+            if(mainCamInliers >= 6)
                 bOK = true;
+            else if(mLastFrame.isSet())
+            {
+                mCurrentFrame.SetPose(mLastFrame.GetPose());
+                bOK = true;
+            }
         }
 
 
@@ -2420,9 +2632,14 @@ void Tracking::Track()
 
             /*if(mCurrentFrame.mnId>mnLastRelocFrameId+mMaxFrames)
             {*/
-                mTimeStampLost = mCurrentFrame.mTimeStamp;
+            mTimeStampLost = mCurrentFrame.mTimeStamp;
             //}
         }
+
+        if(bOK && mCurrentFrame.mnCams > 1 && mCurrentFrame.Nleft == -1)
+            UpdateRigPointCloud();
+        else
+            mRigFramePoints.clear();
 
         // Save frame if recent relocalization, since they are used for IMU reset (as we are making copy, it shluld be once mCurrFrame is completely modified)
         if((mCurrentFrame.mnId<(mnLastRelocFrameId+mnFramesToResetIMU)) && (mCurrentFrame.mnId > mnFramesToResetIMU) &&
@@ -2533,17 +2750,34 @@ void Tracking::Track()
         // Reset if the camera get lost soon after initialization
         if(mState==LOST)
         {
+            if(mCurrentFrame.mnCams > 1 && mCurrentFrame.Nleft == -1)
+            {
+                if(mLastFrame.isSet())
+                    mCurrentFrame.SetPose(mLastFrame.GetPose());
+                mState = OK;
+                mLastFrame = Frame(mCurrentFrame);
+                return;
+            }
+            const bool isMultiCam = (mCurrentFrame.mnCams > 1 && mCurrentFrame.Nleft == -1);
+            const bool withinGrace = isMultiCam && mRigInitFrameId >= 0 &&
+                                     (mCurrentFrame.mnId <= mRigInitFrameId + mRigInitGraceFrames);
             if(pCurrentMap->KeyFramesInMap()<=10)
             {
-                mpSystem->ResetActiveMap();
-                return;
+                if(!withinGrace)
+                {
+                    mpSystem->ResetActiveMap();
+                    return;
+                }
             }
             if (mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
                 if (!pCurrentMap->isImuInitialized())
                 {
                     Verbose::PrintMess("Track lost before IMU initialisation, reseting...", Verbose::VERBOSITY_QUIET);
-                    mpSystem->ResetActiveMap();
-                    return;
+                    if(!withinGrace)
+                    {
+                        mpSystem->ResetActiveMap();
+                        return;
+                    }
                 }
 
             CreateMapInAtlas();
@@ -2712,7 +2946,7 @@ void Tracking::MonocularInitialization()
 {
 
     const bool isMultiCam = (mCurrentFrame.mnCams > 1 && mCurrentFrame.Nleft == -1);
-    int initCamId = isMultiCam ? mMainCamIndex : 0;
+    int initCamId = isMultiCam ? mInitCamIndex : 0;
     if(isMultiCam && initCamId >= mCurrentFrame.mnCams)
         initCamId = 0;
     auto countKeypointsForCam = [](const Frame &frame, int camId) -> int
@@ -2733,7 +2967,7 @@ void Tracking::MonocularInitialization()
     if(!mbReadyToInitializate)
     {
         // Set Reference Frame
-        if(currentCamKeypoints>100)
+        if(currentCamKeypoints>40) //100
         {
 
             mInitialFrame = Frame(mCurrentFrame);
@@ -2759,11 +2993,19 @@ void Tracking::MonocularInitialization()
 
             return;
         }
+        else if(mCurrentFrame.mnId % 200 == 0)
+        {
+            cout << "[Init] wait: frame=" << mCurrentFrame.mnId << " keypoints=" << currentCamKeypoints << endl;
+        }
     }
     else
     {
         if ((currentCamKeypoints<=100)||((mSensor == System::IMU_MONOCULAR)&&(mLastFrame.mTimeStamp-mInitialFrame.mTimeStamp>1.0)))
         {
+            if(mCurrentFrame.mnId % 200 == 0)
+            {
+                cout << "[Init] reset: frame=" << mCurrentFrame.mnId << " keypoints=" << currentCamKeypoints << endl;
+            }
             mbReadyToInitializate = false;
 
             return;
@@ -2773,9 +3015,14 @@ void Tracking::MonocularInitialization()
         ORBmatcher matcher(0.9,true);
         int nmatches = matcher.SearchForInitialization(mInitialFrame,mCurrentFrame,mvbPrevMatched,mvIniMatches,100,initCamId);
 
+        if(mCurrentFrame.mnId % 200 == 0)
+            cout << "[Init] match: frame=" << mCurrentFrame.mnId << " keypoints=" << currentCamKeypoints << " matches=" << nmatches << endl;
+
         // Check if there are enough correspondences
         if(nmatches<100)
         {
+            if(mCurrentFrame.mnId % 200 == 0)
+                cout << "[Init] too few matches: " << nmatches << endl;
             mbReadyToInitializate = false;
             return;
         }
@@ -2802,6 +3049,7 @@ void Tracking::MonocularInitialization()
             mCurrentFrame.SetPose(Tcw);
 
             CreateInitialMapMonocular();
+            mRigInitFrameId = mCurrentFrame.mnId;
         }
     }
 }
@@ -2878,11 +3126,15 @@ void Tracking::CreateInitialMapMonocular()
     else
         invMedianDepth = 1.0f/medianDepth;
 
-    if(medianDepth<0 || pKFcur->TrackedMapPoints(1)<50) // TODO Check, originally 100 tracks
+    const int minInitTracked = (mnCams > 1) ? 10 : 50;
+    if(medianDepth<0 || pKFcur->TrackedMapPoints(1)<minInitTracked) // TODO Check, originally 100 tracks
     {
         Verbose::PrintMess("Wrong initialization, reseting...", Verbose::VERBOSITY_QUIET);
-        mpSystem->ResetActiveMap();
-        return;
+        if(mnCams <= 1)
+        {
+            mpSystem->ResetActiveMap();
+            return;
+        }
     }
 
     // Scale initial baseline
@@ -3012,7 +3264,10 @@ void Tracking::CheckReplacedInLastFrame()
 bool Tracking::TrackReferenceKeyFrame()
 {
     // Compute Bag of Words vector
-    mCurrentFrame.ComputeBoW();
+    if(mCurrentFrame.mnCams > 1 && mCurrentFrame.Nleft == -1)
+        mCurrentFrame.ComputeBoW(mMainCamIndex);
+    else
+        mCurrentFrame.ComputeBoW();
 
     // We perform first an ORB matching with the reference keyframe
     // If enough matches are found we setup a PnP solver
@@ -3022,10 +3277,39 @@ bool Tracking::TrackReferenceKeyFrame()
     int nmatches = matcher.SearchByBoW(mpReferenceKF,mCurrentFrame,vpMapPointMatches);
     const bool isMultiCam = (mCurrentFrame.mnCams > 1 && mCurrentFrame.Nleft == -1);
     const int minRefMatches = isMultiCam ? 4 : 15;
+    if(isMultiCam && (mCurrentFrame.mnId % 10 == 0))
+    {
+        int mainCamMatches = 0;
+        const int mainCamId = NormalizeCamIndex(mMainCamIndex, mCurrentFrame.mnCams);
+        for(int i = 0; i < mCurrentFrame.N; ++i)
+        {
+            if(i >= static_cast<int>(vpMapPointMatches.size()))
+                break;
+            if(!vpMapPointMatches[i])
+                continue;
+            if(!mCurrentFrame.mvKeyPointCamId.empty())
+            {
+                if(i >= static_cast<int>(mCurrentFrame.mvKeyPointCamId.size()))
+                    continue;
+                if(mCurrentFrame.mvKeyPointCamId[i] != mainCamId)
+                    continue;
+            }
+            else if(mainCamId != 0)
+                continue;
+            mainCamMatches++;
+        }
+        std::cout << "[MainCam] TrackRefKF matches=" << mainCamMatches
+                  << " total=" << nmatches << std::endl;
+    }
 
     if(nmatches<minRefMatches)
     {
         cout << "TRACK_REF_KF: Less than " << minRefMatches << " matches!!\n";
+        if(isMultiCam)
+        {
+            mCurrentFrame.SetPose(mLastFrame.GetPose());
+            return true;
+        }
         return false;
     }
 
@@ -3036,10 +3320,20 @@ bool Tracking::TrackReferenceKeyFrame()
 
 
     // cout << " TrackReferenceKeyFrame mLastFrame.mTcw:  " << mLastFrame.mTcw << endl;
-    Optimizer::PoseOptimization(&mCurrentFrame);
+    if(isMultiCam)
+    {
+        UpdateRigGating(mCurrentFrame);
+        ApplyRigGating(mCurrentFrame);
+        Optimizer::PoseOptimization(&mCurrentFrame, &mCurrentFrame.mvCamUsable, &mCurrentFrame.mvCamWeights, 1.0f);
+    }
+    else
+    {
+        Optimizer::PoseOptimization(&mCurrentFrame);
+    }
 
     // Discard outliers
     int nmatchesMap = 0;
+    int mainCamMatchesMap = 0;
     for(int i =0; i<mCurrentFrame.N; i++)
     {
         //if(i >= mCurrentFrame.Nleft) break;
@@ -3062,14 +3356,24 @@ bool Tracking::TrackReferenceKeyFrame()
                 nmatches--;
             }
             else if(mCurrentFrame.mvpMapPoints[i]->Observations()>0)
+            {
                 nmatchesMap++;
+                if(isMultiCam)
+                {
+                    int camId = 0;
+                    if(!mCurrentFrame.mvKeyPointCamId.empty() && i < static_cast<int>(mCurrentFrame.mvKeyPointCamId.size()))
+                        camId = mCurrentFrame.mvKeyPointCamId[i];
+                    if(camId == mMainCamIndex)
+                        mainCamMatchesMap++;
+                }
+            }
         }
     }
 
     if (mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
         return true;
     else
-        return nmatchesMap >= (isMultiCam ? 3 : 10);
+        return (isMultiCam ? mainCamMatchesMap : nmatchesMap) >= (isMultiCam ? 3 : 10);
 }
 
 void Tracking::UpdateLastFrame()
@@ -3178,19 +3482,23 @@ bool Tracking::TrackWithMotionModel()
         th=15;
 
     int nmatches = matcher.SearchByProjection(mCurrentFrame,mLastFrame,th,mSensor==System::MONOCULAR || mSensor==System::IMU_MONOCULAR);
+    const bool isMultiCam = (mCurrentFrame.mnCams > 1 && mCurrentFrame.Nleft == -1);
+    int mainCamMatches = isMultiCam ? CountFrameInliersForCam(mCurrentFrame, mMainCamIndex, false) : nmatches;
 
     // If few matches, uses a wider window search
-    if(nmatches<20)
+    if(mainCamMatches<20)
     {
         Verbose::PrintMess("Not enough matches, wider window search!!", Verbose::VERBOSITY_NORMAL);
         fill(mCurrentFrame.mvpMapPoints.begin(),mCurrentFrame.mvpMapPoints.end(),static_cast<MapPoint*>(NULL));
 
         nmatches = matcher.SearchByProjection(mCurrentFrame,mLastFrame,2*th,mSensor==System::MONOCULAR || mSensor==System::IMU_MONOCULAR);
         Verbose::PrintMess("Matches with wider search: " + to_string(nmatches), Verbose::VERBOSITY_NORMAL);
+        if(isMultiCam)
+            mainCamMatches = CountFrameInliersForCam(mCurrentFrame, mMainCamIndex, false);
 
     }
 
-    if(nmatches<20)
+    if((isMultiCam ? mainCamMatches : nmatches) < 15)
     {
         Verbose::PrintMess("Not enough matches!!", Verbose::VERBOSITY_NORMAL);
         if (mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
@@ -3199,11 +3507,21 @@ bool Tracking::TrackWithMotionModel()
             return false;
     }
 
-    // Optimize frame pose with all matches
-    Optimizer::PoseOptimization(&mCurrentFrame);
+    // Optimize frame pose with gated multi-camera matches
+    if(isMultiCam)
+    {
+        UpdateRigGating(mCurrentFrame);
+        ApplyRigGating(mCurrentFrame);
+        Optimizer::PoseOptimization(&mCurrentFrame, &mCurrentFrame.mvCamUsable, &mCurrentFrame.mvCamWeights, 1.0f);
+    }
+    else
+    {
+        Optimizer::PoseOptimization(&mCurrentFrame);
+    }
 
     // Discard outliers
     int nmatchesMap = 0;
+    int mainCamMatchesMap = 0;
     for(int i =0; i<mCurrentFrame.N; i++)
     {
         if(mCurrentFrame.mvpMapPoints[i])
@@ -3224,7 +3542,17 @@ bool Tracking::TrackWithMotionModel()
                 nmatches--;
             }
             else if(mCurrentFrame.mvpMapPoints[i]->Observations()>0)
+            {
                 nmatchesMap++;
+                if(isMultiCam)
+                {
+                    int camId = 0;
+                    if(!mCurrentFrame.mvKeyPointCamId.empty() && i < static_cast<int>(mCurrentFrame.mvKeyPointCamId.size()))
+                        camId = mCurrentFrame.mvKeyPointCamId[i];
+                    if(camId == mMainCamIndex)
+                        mainCamMatchesMap++;
+                }
+            }
         }
     }
 
@@ -3237,7 +3565,7 @@ bool Tracking::TrackWithMotionModel()
     if (mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
         return true;
     else
-        return nmatchesMap>=10;
+        return (isMultiCam ? mainCamMatchesMap : nmatchesMap) >= 10;
 }
 
 bool Tracking::TrackLocalMap()
@@ -3250,6 +3578,25 @@ bool Tracking::TrackLocalMap()
     UpdateLocalMap();
     SearchLocalPoints();
 
+    const bool isMultiCam = (mCurrentFrame.mnCams > 1 && mCurrentFrame.Nleft == -1);
+    int preOptMatches = 0;
+    if(isMultiCam)
+        preOptMatches = CountFrameInliersForCam(mCurrentFrame, NormalizeCamIndex(mMainCamIndex, mCurrentFrame.mnCams), false);
+    else
+    {
+        for(int i = 0; i < mCurrentFrame.N; ++i)
+            if(mCurrentFrame.mvpMapPoints[i])
+                preOptMatches++;
+    }
+    if(isMultiCam && (mCurrentFrame.mnId % 10 == 0))
+    {
+        std::cout << "[MainCam] LocalMap preOpt=" << preOptMatches
+                  << " localMPs=" << mvpLocalMapPoints.size()
+                  << " localKFs=" << mvpLocalKeyFrames.size() << std::endl;
+    }
+    if(preOptMatches == 0)
+        return false;
+
     // TOO check outliers before PO
     int aux1 = 0, aux2=0;
     for(int i=0; i<mCurrentFrame.N; i++)
@@ -3261,15 +3608,28 @@ bool Tracking::TrackLocalMap()
         }
 
     int inliers;
-    const bool isMultiCam = (mCurrentFrame.mnCams > 1 && mCurrentFrame.Nleft == -1);
+    if(isMultiCam)
+    {
+        UpdateRigGating(mCurrentFrame);
+        ApplyRigGating(mCurrentFrame);
+    }
+
     if (!mpAtlas->isImuInitialized())
-        inliers = Optimizer::PoseOptimization(&mCurrentFrame);
+    {
+        if(isMultiCam)
+            inliers = Optimizer::PoseOptimization(&mCurrentFrame, &mCurrentFrame.mvCamUsable, &mCurrentFrame.mvCamWeights, 1.0f);
+        else
+            inliers = Optimizer::PoseOptimization(&mCurrentFrame);
+    }
     else
     {
         if(mCurrentFrame.mnId<=mnLastRelocFrameId+mnFramesToResetIMU)
         {
             Verbose::PrintMess("TLM: PoseOptimization ", Verbose::VERBOSITY_DEBUG);
-            Optimizer::PoseOptimization(&mCurrentFrame);
+            if(isMultiCam)
+                Optimizer::PoseOptimization(&mCurrentFrame, &mCurrentFrame.mvCamUsable, &mCurrentFrame.mvCamWeights, 1.0f);
+            else
+                Optimizer::PoseOptimization(&mCurrentFrame);
         }
         else
         {
@@ -3297,6 +3657,7 @@ bool Tracking::TrackLocalMap()
         }
 
     mnMatchesInliers = 0;
+    int mainCamInliers = 0;
 
     // Update MapPoints Statistics
     for(int i=0; i<mCurrentFrame.N; i++)
@@ -3306,40 +3667,51 @@ bool Tracking::TrackLocalMap()
             if(!mCurrentFrame.mvbOutlier[i])
             {
                 mCurrentFrame.mvpMapPoints[i]->IncreaseFound();
+                int camId = 0;
+                if(!mCurrentFrame.mvKeyPointCamId.empty() && i < static_cast<int>(mCurrentFrame.mvKeyPointCamId.size()))
+                    camId = mCurrentFrame.mvKeyPointCamId[i];
                 if(!mbOnlyTracking)
                 {
                     if(mCurrentFrame.mvpMapPoints[i]->Observations()>0)
-                        mnMatchesInliers++;
+                    {
+                        if(isMultiCam)
+                        {
+                            if(camId == mMainCamIndex)
+                                mainCamInliers++;
+                        }
+                        else
+                            mnMatchesInliers++;
+                    }
                 }
                 else
-                    mnMatchesInliers++;
+                {
+                    if(isMultiCam)
+                    {
+                        if(camId == mMainCamIndex)
+                            mainCamInliers++;
+                    }
+                    else
+                        mnMatchesInliers++;
+                }
             }
             else if(mSensor==System::STEREO)
                 mCurrentFrame.mvpMapPoints[i] = static_cast<MapPoint*>(NULL);
         }
     }
 
+    if(isMultiCam)
+        mnMatchesInliers = mainCamInliers;
+
+    if(isMultiCam && (mCurrentFrame.mnId % 10 == 0))
+    {
+        std::cout << "[MainCam] LocalMap inliers=" << mnMatchesInliers
+                  << " localMPs=" << mvpLocalMapPoints.size() << std::endl;
+    }
+
     // Decide if the tracking was succesful
     // More restrictive if there was a relocalization recently
     mpLocalMapper->mnMatchesInliers=mnMatchesInliers;
     int bestCamInliers = mnMatchesInliers;
-    if(isMultiCam)
-    {
-        std::vector<int> perCamInliers(mCurrentFrame.mnCams, 0);
-        for(int i=0; i<mCurrentFrame.N; i++)
-        {
-            if(!mCurrentFrame.mvpMapPoints[i] || mCurrentFrame.mvbOutlier[i])
-                continue;
-            int camId = 0;
-            if(!mCurrentFrame.mvKeyPointCamId.empty() && i < static_cast<int>(mCurrentFrame.mvKeyPointCamId.size()))
-                camId = mCurrentFrame.mvKeyPointCamId[i];
-            if(camId >= 0 && camId < static_cast<int>(perCamInliers.size()))
-                perCamInliers[camId]++;
-        }
-        bestCamInliers = 0;
-        for(int count : perCamInliers)
-            bestCamInliers = std::max(bestCamInliers, count);
-    }
     const int minRelocInliers = isMultiCam ? 4 : 50;
     if(mCurrentFrame.mnId<mnLastRelocFrameId+mMaxFrames && bestCamInliers<minRelocInliers)
         return false;
@@ -3417,6 +3789,14 @@ bool Tracking::NeedNewKeyFrame()
 
     // Local Mapping accept keyframes?
     bool bLocalMappingIdle = mpLocalMapper->AcceptKeyFrames();
+
+    if(isMultiCam)
+    {
+        if(mCurrentFrame.mnId>=mnLastKeyFrameId+mMaxFrames)
+            return true;
+        if((mCurrentFrame.mnId>=mnLastKeyFrameId+mMinFrames) && bLocalMappingIdle)
+            return true;
+    }
 
     // Check how many "close" points are being tracked and how many could be potentially created.
     int nNonTrackedClose = 0;
@@ -3538,6 +3918,12 @@ void Tracking::CreateNewKeyFrame()
 
     if(!mpLocalMapper->SetNotStop(true))
         return;
+
+    if(mCurrentFrame.mnCams > 1 && mCurrentFrame.Nleft == -1 && mCurrentFrame.mvCamUsable.empty())
+    {
+        UpdateRigGating(mCurrentFrame);
+        ApplyRigGating(mCurrentFrame);
+    }
 
     KeyFrame* pKF = new KeyFrame(mCurrentFrame,mpAtlas->GetCurrentMap(),mpKeyFrameDB);
 
@@ -3695,25 +4081,9 @@ void Tracking::SearchLocalPoints()
         bool bInView = false;
         if(mCurrentFrame.mnCams > 1 && mCurrentFrame.Nleft == -1)
         {
-            float bestCos = -1.0f;
-            int bestCam = -1;
-            for(int cam = 0; cam < mCurrentFrame.mnCams; ++cam)
-            {
-                if(mCurrentFrame.isInFrustum(pMP,0.5,cam))
-                {
-                    if(pMP->mTrackViewCos > bestCos)
-                    {
-                        bestCos = pMP->mTrackViewCos;
-                        bestCam = cam;
-                    }
-                }
-            }
-
-            if(bestCam >= 0)
-            {
-                mCurrentFrame.isInFrustum(pMP,0.5,bestCam);
+            const int mainCamId = NormalizeCamIndex(mMainCamIndex, mCurrentFrame.mnCams);
+            if(mCurrentFrame.isInFrustum(pMP,0.5,mainCamId))
                 bInView = true;
-            }
         }
         else
         {
@@ -3765,6 +4135,279 @@ void Tracking::SearchLocalPoints()
     }
 }
 
+void Tracking::UpdateRigPointCloud()
+{
+    mRigFramePoints.clear();
+    if(mCurrentFrame.mnCams <= 1 || mCurrentFrame.Nleft != -1)
+        return;
+    if(mCurrentFrame.mvpCameras.empty() || mCurrentFrame.mvTcr.size() != mCurrentFrame.mvpCameras.size())
+        return;
+
+    const int mainCamId = NormalizeCamIndex(mMainCamIndex, mCurrentFrame.mnCams);
+    std::vector<int> mainIndices;
+    mainIndices.reserve(mCurrentFrame.N);
+    for(int i = 0; i < mCurrentFrame.N; ++i)
+    {
+        int camId = 0;
+        if(!mCurrentFrame.mvKeyPointCamId.empty() && i < static_cast<int>(mCurrentFrame.mvKeyPointCamId.size()))
+            camId = mCurrentFrame.mvKeyPointCamId[i];
+        if(camId == mainCamId)
+            mainIndices.push_back(i);
+    }
+
+    if(mainIndices.size() < 8)
+        return;
+
+    const cv::Mat descMain = BuildDescriptorSubset(mCurrentFrame.mDescriptors, mainIndices);
+    if(descMain.empty())
+        return;
+
+    GeometricCamera* camMain = mCurrentFrame.mvpCameras[mainCamId];
+    if(!camMain)
+        return;
+
+    const Sophus::SE3f TcwRig = mCurrentFrame.GetPose();
+    const Sophus::SE3f TcwMain = mCurrentFrame.mvTcr[mainCamId] * TcwRig;
+    Eigen::Matrix<float,3,4> eigTcwMain = TcwMain.matrix3x4();
+    const Eigen::Matrix3f RcwMain = eigTcwMain.block<3,3>(0,0);
+    const Eigen::Matrix3f RwcMain = RcwMain.transpose();
+    const Eigen::Vector3f tcwMain = TcwMain.translation();
+
+    cv::BFMatcher matcher(cv::NORM_HAMMING);
+    const float ratio = 0.75f;
+    const float minParallaxCos = 0.9998f;
+    const float reprojChi2 = 5.991f;
+
+    for(int camId = 0; camId < mCurrentFrame.mnCams; ++camId)
+    {
+        if(camId == mainCamId)
+            continue;
+        if(!mCurrentFrame.mvCamUsable.empty() && camId < static_cast<int>(mCurrentFrame.mvCamUsable.size()))
+        {
+            if(!mCurrentFrame.mvCamUsable[camId])
+                continue;
+        }
+        GeometricCamera* camOther = mCurrentFrame.mvpCameras[camId];
+        if(!camOther)
+            continue;
+
+        std::vector<int> otherIndices;
+        otherIndices.reserve(mCurrentFrame.N);
+        for(int i = 0; i < mCurrentFrame.N; ++i)
+        {
+            int keyCamId = 0;
+            if(!mCurrentFrame.mvKeyPointCamId.empty() && i < static_cast<int>(mCurrentFrame.mvKeyPointCamId.size()))
+                keyCamId = mCurrentFrame.mvKeyPointCamId[i];
+            if(keyCamId == camId)
+                otherIndices.push_back(i);
+        }
+
+        if(otherIndices.size() < 8)
+            continue;
+
+        const cv::Mat descOther = BuildDescriptorSubset(mCurrentFrame.mDescriptors, otherIndices);
+        if(descOther.empty())
+            continue;
+
+        std::vector<std::vector<cv::DMatch>> knnMatches;
+        matcher.knnMatch(descMain, descOther, knnMatches, 2);
+
+        const Sophus::SE3f TcwOther = mCurrentFrame.mvTcr[camId] * TcwRig;
+        Eigen::Matrix<float,3,4> eigTcwOther = TcwOther.matrix3x4();
+        const Eigen::Matrix3f RcwOther = eigTcwOther.block<3,3>(0,0);
+        const Eigen::Matrix3f RwcOther = RcwOther.transpose();
+        const Eigen::Vector3f tcwOther = TcwOther.translation();
+
+        for(const auto &matches : knnMatches)
+        {
+            if(matches.size() < 2)
+                continue;
+            const cv::DMatch &m1 = matches[0];
+            const cv::DMatch &m2 = matches[1];
+            if(m1.distance > ratio * m2.distance)
+                continue;
+
+            const int idxMain = mainIndices[m1.queryIdx];
+            const int idxOther = otherIndices[m1.trainIdx];
+            if(idxMain < 0 || idxOther < 0)
+                continue;
+
+            const cv::KeyPoint &kpMain = mCurrentFrame.mvKeysUn[idxMain];
+            const cv::KeyPoint &kpOther = mCurrentFrame.mvKeysUn[idxOther];
+
+            Eigen::Vector3f xn1 = camMain->unprojectEig(kpMain.pt);
+            Eigen::Vector3f xn2 = camOther->unprojectEig(kpOther.pt);
+
+            Eigen::Vector3f ray1 = RwcMain * xn1;
+            Eigen::Vector3f ray2 = RwcOther * xn2;
+            const float cosParallax = ray1.dot(ray2) / (ray1.norm() * ray2.norm());
+            if(cosParallax > minParallaxCos)
+                continue;
+
+            Eigen::Vector3f x3D;
+            if(!GeometricTools::Triangulate(xn1, xn2, eigTcwMain, eigTcwOther, x3D))
+                continue;
+
+            const float z1 = RcwMain.row(2).dot(x3D) + tcwMain(2);
+            const float z2 = RcwOther.row(2).dot(x3D) + tcwOther(2);
+            if(z1 <= 0 || z2 <= 0)
+                continue;
+
+            const float sigma1 = mCurrentFrame.mvLevelSigma2[kpMain.octave];
+            const float sigma2 = mCurrentFrame.mvLevelSigma2[kpOther.octave];
+
+            const float x1 = RcwMain.row(0).dot(x3D) + tcwMain(0);
+            const float y1 = RcwMain.row(1).dot(x3D) + tcwMain(1);
+            cv::Point2f uv1 = camMain->project(cv::Point3f(x1, y1, z1));
+            const float errX1 = uv1.x - kpMain.pt.x;
+            const float errY1 = uv1.y - kpMain.pt.y;
+            if((errX1 * errX1 + errY1 * errY1) > reprojChi2 * sigma1)
+                continue;
+
+            const float x2 = RcwOther.row(0).dot(x3D) + tcwOther(0);
+            const float y2 = RcwOther.row(1).dot(x3D) + tcwOther(1);
+            cv::Point2f uv2 = camOther->project(cv::Point3f(x2, y2, z2));
+            const float errX2 = uv2.x - kpOther.pt.x;
+            const float errY2 = uv2.y - kpOther.pt.y;
+            if((errX2 * errX2 + errY2 * errY2) > reprojChi2 * sigma2)
+                continue;
+
+            Eigen::Vector3f xRig = (TcwRig * x3D);
+            mRigFramePoints.push_back(xRig);
+            mRigPointCloud.push_back(xRig);
+        }
+    }
+}
+
+void Tracking::UpdateRigGating(Frame &frame)
+{
+    if(frame.mnCams <= 1 || frame.Nleft != -1)
+    {
+        frame.mvCamUsable.assign(frame.mnCams, 1);
+        frame.mvCamWeights.assign(frame.mnCams, 1.0f);
+        return;
+    }
+
+    const int nCam = frame.mnCams;
+    const int mainCamId = NormalizeCamIndex(mMainCamIndex, nCam);
+    frame.mnMainCamIndex = mainCamId;
+    frame.mvCamUsable.assign(nCam, 0);
+    frame.mvCamWeights.assign(nCam, 0.0f);
+
+    std::vector<std::vector<float>> reprojErrors(nCam);
+    std::vector<int> inliers(nCam, 0);
+
+    const Sophus::SE3f TcwRig = frame.GetPose();
+    for(int i = 0; i < frame.N; ++i)
+    {
+        MapPoint* pMP = frame.mvpMapPoints[i];
+        if(!pMP)
+            continue;
+        int camId = 0;
+        if(!frame.mvKeyPointCamId.empty() && i < static_cast<int>(frame.mvKeyPointCamId.size()))
+            camId = frame.mvKeyPointCamId[i];
+        if(camId < 0 || camId >= nCam)
+            continue;
+        if(camId >= static_cast<int>(frame.mvpCameras.size()))
+            continue;
+        GeometricCamera* pCam = frame.mvpCameras[camId];
+        if(!pCam)
+            continue;
+
+        Sophus::SE3f TcwCam = frame.mvTcr[camId] * TcwRig;
+        Eigen::Vector3f Xc = TcwCam * pMP->GetWorldPos();
+        if(Xc(2) <= 0)
+            continue;
+        cv::Point2f uv = pCam->project(cv::Point3f(Xc(0), Xc(1), Xc(2)));
+        const cv::KeyPoint &kp = frame.mvKeysUn[i];
+        const float dx = uv.x - kp.pt.x;
+        const float dy = uv.y - kp.pt.y;
+        const float err = std::sqrt(dx * dx + dy * dy);
+        reprojErrors[camId].push_back(err);
+        inliers[camId]++;
+    }
+
+    auto medianOf = [](std::vector<float> &vals) -> float {
+        if(vals.empty())
+            return 0.0f;
+        const size_t mid = vals.size() / 2;
+        std::nth_element(vals.begin(), vals.begin() + mid, vals.end());
+        return vals[mid];
+    };
+
+    frame.mvCamUsable[mainCamId] = 1;
+    frame.mvCamWeights[mainCamId] = 1.0f;
+
+    std::vector<unsigned char> mainMask(nCam, 0);
+    mainMask[mainCamId] = 1;
+
+    Sophus::SE3f TcwInit = frame.GetPose();
+    Optimizer::PoseOptimization(&frame, &mainMask, nullptr, 1.0f);
+    const Sophus::SE3f TcwMain = frame.GetPose();
+    frame.SetPose(TcwInit);
+
+    for(int camId = 0; camId < nCam; ++camId)
+    {
+        if(camId == mainCamId)
+            continue;
+        const int minInliers = (camId < static_cast<int>(mvGateMinInliers.size())) ? mvGateMinInliers[camId] : 15;
+        const float maxReproj = (camId < static_cast<int>(mvGateMaxReproj.size())) ? mvGateMaxReproj[camId] : 5.0f;
+        if(inliers[camId] < minInliers)
+            continue;
+        float medianErr = 0.0f;
+        if(!reprojErrors[camId].empty())
+            medianErr = medianOf(reprojErrors[camId]);
+        if(medianErr > maxReproj && maxReproj > 0.0f)
+            continue;
+
+        std::vector<unsigned char> camMask(nCam, 0);
+        camMask[camId] = 1;
+        Optimizer::PoseOptimization(&frame, &camMask, nullptr, mGateRobustScale);
+        const Sophus::SE3f TcwAux = frame.GetPose();
+        const Sophus::SE3f delta = TcwAux * TcwMain.inverse();
+        const float deltaNorm = delta.log().norm();
+        frame.SetPose(TcwInit);
+        if(deltaNorm > mGateDelta)
+            continue;
+
+        float weight = 1.0f;
+        if(mGateRefInliers > 0.0f)
+            weight = std::min(1.0f, static_cast<float>(inliers[camId]) / mGateRefInliers);
+        if(medianErr > 0.0f && maxReproj > 0.0f)
+            weight = std::min(weight, maxReproj / medianErr);
+        if(weight < mGateMinWeight)
+            weight = mGateMinWeight;
+
+        frame.mvCamUsable[camId] = 1;
+        frame.mvCamWeights[camId] = weight;
+    }
+
+    if(!frame.mvbOutlier.empty())
+        std::fill(frame.mvbOutlier.begin(), frame.mvbOutlier.end(), false);
+    frame.SetPose(TcwMain);
+}
+
+void Tracking::ApplyRigGating(Frame &frame)
+{
+    if(frame.mnCams <= 1 || frame.Nleft != -1)
+        return;
+    if(frame.mvCamUsable.empty())
+        return;
+    for(int i = 0; i < frame.N; ++i)
+    {
+        int camId = 0;
+        if(!frame.mvKeyPointCamId.empty() && i < static_cast<int>(frame.mvKeyPointCamId.size()))
+            camId = frame.mvKeyPointCamId[i];
+        if(camId < 0 || camId >= static_cast<int>(frame.mvCamUsable.size()))
+            continue;
+        if(!frame.mvCamUsable[camId])
+        {
+            frame.mvpMapPoints[i] = static_cast<MapPoint*>(NULL);
+            frame.mvbOutlier[i] = false;
+        }
+    }
+}
+
 void Tracking::UpdateLocalMap()
 {
     // This is for visualization
@@ -3780,18 +4423,31 @@ void Tracking::UpdateLocalPoints()
     mvpLocalMapPoints.clear();
 
     int count_pts = 0;
+    const bool isMultiCam = (mCurrentFrame.mnCams > 1 && mCurrentFrame.Nleft == -1);
 
     for(vector<KeyFrame*>::const_reverse_iterator itKF=mvpLocalKeyFrames.rbegin(), itEndKF=mvpLocalKeyFrames.rend(); itKF!=itEndKF; ++itKF)
     {
         KeyFrame* pKF = *itKF;
         const vector<MapPoint*> vpMPs = pKF->GetMapPointMatches();
+        const int mainCamId = isMultiCam ? NormalizeCamIndex(mMainCamIndex, pKF->mnCams) : 0;
 
-        for(vector<MapPoint*>::const_iterator itMP=vpMPs.begin(), itEndMP=vpMPs.end(); itMP!=itEndMP; itMP++)
+        for(size_t i = 0; i < vpMPs.size(); ++i)
         {
-
-            MapPoint* pMP = *itMP;
+            MapPoint* pMP = vpMPs[i];
             if(!pMP)
                 continue;
+            if(isMultiCam)
+            {
+                if(!pKF->mvKeyPointCamId.empty())
+                {
+                    if(i >= pKF->mvKeyPointCamId.size())
+                        continue;
+                    if(pKF->mvKeyPointCamId[i] != mainCamId)
+                        continue;
+                }
+                else if(mainCamId != 0)
+                    continue;
+            }
             if(pMP->mnTrackReferenceForFrame==mCurrentFrame.mnId)
                 continue;
             if(!pMP->isBad())
@@ -3809,10 +4465,24 @@ void Tracking::UpdateLocalKeyFrames()
 {
     // Each map point vote for the keyframes in which it has been observed
     map<KeyFrame*,int> keyframeCounter;
+    const bool isMultiCam = (mCurrentFrame.mnCams > 1 && mCurrentFrame.Nleft == -1);
+    const int mainCamId = isMultiCam ? NormalizeCamIndex(mMainCamIndex, mCurrentFrame.mnCams) : 0;
     if(!mpAtlas->isImuInitialized() || (mCurrentFrame.mnId<mnLastRelocFrameId+2))
     {
         for(int i=0; i<mCurrentFrame.N; i++)
         {
+            if(isMultiCam)
+            {
+                if(!mCurrentFrame.mvKeyPointCamId.empty())
+                {
+                    if(i >= static_cast<int>(mCurrentFrame.mvKeyPointCamId.size()))
+                        continue;
+                    if(mCurrentFrame.mvKeyPointCamId[i] != mainCamId)
+                        continue;
+                }
+                else if(mainCamId != 0)
+                    continue;
+            }
             MapPoint* pMP = mCurrentFrame.mvpMapPoints[i];
             if(pMP)
             {
@@ -3833,6 +4503,18 @@ void Tracking::UpdateLocalKeyFrames()
     {
         for(int i=0; i<mLastFrame.N; i++)
         {
+            if(isMultiCam)
+            {
+                if(!mLastFrame.mvKeyPointCamId.empty())
+                {
+                    if(i >= static_cast<int>(mLastFrame.mvKeyPointCamId.size()))
+                        continue;
+                    if(mLastFrame.mvKeyPointCamId[i] != mainCamId)
+                        continue;
+                }
+                else if(mainCamId != 0)
+                    continue;
+            }
             // Using lastframe since current frame has not matches yet
             if(mLastFrame.mvpMapPoints[i])
             {
@@ -4056,10 +4738,19 @@ bool Tracking::Relocalization()
                         mCurrentFrame.mvpMapPoints[j]=NULL;
                 }
 
-                int nGood = Optimizer::PoseOptimization(&mCurrentFrame);
+                int nGood = 0;
+                if(isMultiCam)
+                {
+                    std::vector<unsigned char> mainMask(mCurrentFrame.mnCams, 0);
+                    mainMask[mMainCamIndex] = 1;
+                    nGood = Optimizer::PoseOptimization(&mCurrentFrame, &mainMask, nullptr, 1.0f);
+                }
+                else
+                    nGood = Optimizer::PoseOptimization(&mCurrentFrame);
+                int mainCamInliers = isMultiCam ? CountFrameInliersForCam(mCurrentFrame, mMainCamIndex, false) : nGood;
 
                 const int minPnPInliers = isMultiCam ? 15 : 10;
-                if(nGood<minPnPInliers)
+                if(mainCamInliers<minPnPInliers)
                     continue;
 
                 for(int io =0; io<mCurrentFrame.N; io++)
@@ -4067,15 +4758,23 @@ bool Tracking::Relocalization()
                         mCurrentFrame.mvpMapPoints[io]=static_cast<MapPoint*>(NULL);
 
                 const int minRelocInliers = isMultiCam ? 25 : 50;
-                if(nGood<minRelocInliers)
+                if(mainCamInliers<minRelocInliers)
                 {
                     int nadditional =matcher2.SearchByProjection(mCurrentFrame,vpCandidateKFs[i],sFound,10,100);
 
-                    if(nadditional+nGood>=minRelocInliers)
+                    if(nadditional+mainCamInliers>=minRelocInliers)
                     {
-                        nGood = Optimizer::PoseOptimization(&mCurrentFrame);
+                        if(isMultiCam)
+                        {
+                            std::vector<unsigned char> mainMask(mCurrentFrame.mnCams, 0);
+                            mainMask[mMainCamIndex] = 1;
+                            nGood = Optimizer::PoseOptimization(&mCurrentFrame, &mainMask, nullptr, 1.0f);
+                        }
+                        else
+                            nGood = Optimizer::PoseOptimization(&mCurrentFrame);
+                        mainCamInliers = isMultiCam ? CountFrameInliersForCam(mCurrentFrame, mMainCamIndex, false) : nGood;
 
-                        if(nGood>30 && nGood<minRelocInliers)
+                        if(mainCamInliers>30 && mainCamInliers<minRelocInliers)
                         {
                             sFound.clear();
                             for(int ip =0; ip<mCurrentFrame.N; ip++)
@@ -4083,9 +4782,17 @@ bool Tracking::Relocalization()
                                     sFound.insert(mCurrentFrame.mvpMapPoints[ip]);
                             nadditional =matcher2.SearchByProjection(mCurrentFrame,vpCandidateKFs[i],sFound,3,64);
 
-                            if(nGood+nadditional>=minRelocInliers)
+                            if(mainCamInliers+nadditional>=minRelocInliers)
                             {
-                                nGood = Optimizer::PoseOptimization(&mCurrentFrame);
+                                if(isMultiCam)
+                                {
+                                    std::vector<unsigned char> mainMask(mCurrentFrame.mnCams, 0);
+                                    mainMask[mMainCamIndex] = 1;
+                                    nGood = Optimizer::PoseOptimization(&mCurrentFrame, &mainMask, nullptr, 1.0f);
+                                }
+                                else
+                                    nGood = Optimizer::PoseOptimization(&mCurrentFrame);
+                                mainCamInliers = isMultiCam ? CountFrameInliersForCam(mCurrentFrame, mMainCamIndex, false) : nGood;
 
                                 for(int io =0; io<mCurrentFrame.N; io++)
                                     if(mCurrentFrame.mvbOutlier[io])
@@ -4095,7 +4802,7 @@ bool Tracking::Relocalization()
                     }
                 }
 
-                if(nGood>=minRelocInliers)
+                if(mainCamInliers>=minRelocInliers)
                 {
                     bMatch = true;
                     break;
@@ -4167,6 +4874,8 @@ void Tracking::Reset(bool bLocMap)
     mCurrentFrame = Frame();
     mnLastRelocFrameId = 0;
     mLastFrame = Frame();
+    mRigPointCloud.clear();
+    mRigFramePoints.clear();
     mpReferenceKF = static_cast<KeyFrame*>(NULL);
     mpLastKeyFrame = static_cast<KeyFrame*>(NULL);
     mvIniMatches.clear();
@@ -4217,6 +4926,8 @@ void Tracking::ResetActiveMap(bool bLocMap)
     mState = NO_IMAGES_YET; //NOT_INITIALIZED;
 
     mbReadyToInitializate = false;
+    mRigPointCloud.clear();
+    mRigFramePoints.clear();
 
     list<bool> lbLost;
     // lbLost.reserve(mlbLost.size());

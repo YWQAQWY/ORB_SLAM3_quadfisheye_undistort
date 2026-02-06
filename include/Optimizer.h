@@ -57,6 +57,7 @@ public:
     void static LocalBundleAdjustment(KeyFrame* pKF, bool *pbStopFlag, Map *pMap, int& num_fixedKF, int& num_OptKF, int& num_MPs, int& num_edges, bool bOnlyCam0 = false);
 
     int static PoseOptimization(Frame* pFrame);
+    int static PoseOptimization(Frame* pFrame, const std::vector<unsigned char>* pCamUsable, const std::vector<float>* pCamWeights, float robustScale = 1.0f);
     int static PoseInertialOptimizationLastKeyFrame(Frame* pFrame, bool bRecInit = false);
     int static PoseInertialOptimizationLastFrame(Frame *pFrame, bool bRecInit = false);
 

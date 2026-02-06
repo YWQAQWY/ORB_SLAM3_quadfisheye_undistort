@@ -24,6 +24,8 @@
 #include<opencv2/core/core.hpp>
 
 #include "Thirdparty/DBoW2/DBoW2/FeatureVector.h"
+#include "Thirdparty/DBoW2/DBoW2/BowVector.h"
+#include "Converter.h"
 
 #include<stdint-gcc.h>
 
@@ -44,6 +46,31 @@ int FirstValidIndex(const std::vector<int> &indexes)
         }
     }
     return -1;
+}
+
+bool BuildFeatureVectorForCam(KeyFrame *pKF, int camId, DBoW2::FeatureVector &featVec, DBoW2::BowVector &bowVec, std::vector<int> &indexMap)
+{
+    if(!pKF || !pKF->GetVocabulary())
+        return false;
+    if(pKF->mDescriptors.empty())
+        return false;
+    indexMap.clear();
+    indexMap.reserve(pKF->mDescriptors.rows);
+    for(int i = 0; i < pKF->mDescriptors.rows; ++i)
+    {
+        if(i < static_cast<int>(pKF->mvKeyPointCamId.size()) && pKF->mvKeyPointCamId[i] == camId)
+            indexMap.push_back(i);
+    }
+    if(indexMap.empty())
+        return false;
+
+    cv::Mat subset(static_cast<int>(indexMap.size()), pKF->mDescriptors.cols, pKF->mDescriptors.type());
+    for(size_t i = 0; i < indexMap.size(); ++i)
+        pKF->mDescriptors.row(indexMap[i]).copyTo(subset.row(static_cast<int>(i)));
+
+    vector<cv::Mat> vCurrentDesc = Converter::toDescriptorVector(subset);
+    pKF->GetVocabulary()->transform(vCurrentDesc, bowVec, featVec, 4);
+    return !featVec.empty();
 }
 }
 
@@ -272,8 +299,12 @@ int FirstValidIndex(const std::vector<int> &indexes)
 
                 for(size_t iKF=0; iKF<vIndicesKF.size(); iKF++)
                 {
-                    const unsigned int realIdxKF = vIndicesKF[iKF];
+                    unsigned int realIdxKF = vIndicesKF[iKF];
+                    if(!pKF->mvBowIndexToKeyId.empty() && realIdxKF < pKF->mvBowIndexToKeyId.size())
+                        realIdxKF = static_cast<unsigned int>(pKF->mvBowIndexToKeyId[realIdxKF]);
 
+                    if(realIdxKF >= vpMapPointsKF.size())
+                        continue;
                     MapPoint* pMP = vpMapPointsKF[realIdxKF];
 
                     if(!pMP)
@@ -295,8 +326,12 @@ int FirstValidIndex(const std::vector<int> &indexes)
                     for(size_t iF=0; iF<vIndicesF.size(); iF++)
                     {
                         if(F.Nleft == -1){
-                            const unsigned int realIdxF = vIndicesF[iF];
+                            unsigned int realIdxF = vIndicesF[iF];
+                            if(!F.mvBowIndexToKeyId.empty() && realIdxF < F.mvBowIndexToKeyId.size())
+                                realIdxF = static_cast<unsigned int>(F.mvBowIndexToKeyId[realIdxF]);
 
+                            if(realIdxF >= vpMapPointMatches.size())
+                                continue;
                             if(vpMapPointMatches[realIdxF])
                                 continue;
 
@@ -316,8 +351,12 @@ int FirstValidIndex(const std::vector<int> &indexes)
                             }
                         }
                         else{
-                            const unsigned int realIdxF = vIndicesF[iF];
+                            unsigned int realIdxF = vIndicesF[iF];
+                            if(!F.mvBowIndexToKeyId.empty() && realIdxF < F.mvBowIndexToKeyId.size())
+                                realIdxF = static_cast<unsigned int>(F.mvBowIndexToKeyId[realIdxF]);
 
+                            if(realIdxF >= vpMapPointMatches.size())
+                                continue;
                             if(vpMapPointMatches[realIdxF])
                                 continue;
 
@@ -684,8 +723,11 @@ int ORBmatcher::SearchForInitialization(Frame &F1, Frame &F2, vector<cv::Point2f
     {
         if(!F1.mvKeyPointCamId.empty())
         {
-            if(i1 >= F1.mvKeyPointCamId.size() || F1.mvKeyPointCamId[i1] != mainCamId)
-                continue;
+            if(!F1.mvKeyPointCamId.empty())
+            {
+                if(i1 >= F1.mvKeyPointCamId.size() || F1.mvKeyPointCamId[i1] != mainCamId)
+                    continue;
+            }
         }
             cv::KeyPoint kp1 = F1.mvKeysUn[i1];
             int level1 = kp1.octave;
@@ -713,8 +755,11 @@ int ORBmatcher::SearchForInitialization(Frame &F1, Frame &F2, vector<cv::Point2f
 
             if(!F2.mvKeyPointCamId.empty())
             {
-                if(i2 >= F2.mvKeyPointCamId.size() || F2.mvKeyPointCamId[i2] != mainCamId)
-                    continue;
+        if(!F2.mvKeyPointCamId.empty())
+        {
+            if(i2 >= F2.mvKeyPointCamId.size() || F2.mvKeyPointCamId[i2] != mainCamId)
+                continue;
+        }
             }
 
                 cv::Mat d2 = F2.mDescriptors.row(i2);
@@ -833,7 +878,9 @@ int ORBmatcher::SearchForInitialization(Frame &F1, Frame &F2, vector<cv::Point2f
             {
                 for(size_t i1=0, iend1=f1it->second.size(); i1<iend1; i1++)
                 {
-                    const size_t idx1 = f1it->second[i1];
+                    size_t idx1 = f1it->second[i1];
+                    if(!pKF1->mvBowIndexToKeyId.empty() && idx1 < pKF1->mvBowIndexToKeyId.size())
+                        idx1 = static_cast<size_t>(pKF1->mvBowIndexToKeyId[idx1]);
                     if(pKF1 -> NLeft != -1 && idx1 >= pKF1 -> mvKeysUn.size()){
                         continue;
                     }
@@ -852,7 +899,9 @@ int ORBmatcher::SearchForInitialization(Frame &F1, Frame &F2, vector<cv::Point2f
 
                     for(size_t i2=0, iend2=f2it->second.size(); i2<iend2; i2++)
                     {
-                        const size_t idx2 = f2it->second[i2];
+                        size_t idx2 = f2it->second[i2];
+                        if(!pKF2->mvBowIndexToKeyId.empty() && idx2 < pKF2->mvBowIndexToKeyId.size())
+                            idx2 = static_cast<size_t>(pKF2->mvBowIndexToKeyId[idx2]);
 
                         if(pKF2 -> NLeft != -1 && idx2 >= pKF2 -> mvKeysUn.size()){
                             continue;
@@ -1007,6 +1056,220 @@ int ORBmatcher::SearchForInitialization(Frame &F1, Frame &F2, vector<cv::Point2f
 
         Eigen::Matrix3f Rll = Tll.rotationMatrix(), Rlr  = Tlr.rotationMatrix(), Rrl  = Trl.rotationMatrix(), Rrr  = Trr.rotationMatrix();
         Eigen::Vector3f tll = Tll.translation(), tlr = Tlr.translation(), trl = Trl.translation(), trr = Trr.translation();
+
+        if(isMultiCam && !pKF1->mvKeyPointCamId.empty() && !pKF2->mvKeyPointCamId.empty())
+        {
+            vMatchedPairs.clear();
+            int totalMatches = 0;
+            const int nCams = std::min(pKF1->mnCams, pKF2->mnCams);
+            for(int camId = 0; camId < nCams; ++camId)
+            {
+                if(camId < static_cast<int>(pKF1->mvCamUsable.size()) && !pKF1->mvCamUsable[camId])
+                    continue;
+                if(camId < static_cast<int>(pKF2->mvCamUsable.size()) && !pKF2->mvCamUsable[camId])
+                    continue;
+                DBoW2::FeatureVector vFeatVec1Cam, vFeatVec2Cam;
+                DBoW2::BowVector bow1Cam, bow2Cam;
+                vector<int> map1, map2;
+                if(!BuildFeatureVectorForCam(pKF1, camId, vFeatVec1Cam, bow1Cam, map1))
+                    continue;
+                if(!BuildFeatureVectorForCam(pKF2, camId, vFeatVec2Cam, bow2Cam, map2))
+                    continue;
+
+                int nmatches = 0;
+                vector<bool> vbMatched2(pKF2->N,false);
+                vector<int> vMatches12(pKF1->N,-1);
+                vector<int> rotHist[HISTO_LENGTH];
+                for(int i=0;i<HISTO_LENGTH;i++)
+                    rotHist[i].reserve(500);
+                const float factor = 1.0f/HISTO_LENGTH;
+
+                DBoW2::FeatureVector::const_iterator f1it = vFeatVec1Cam.begin();
+                DBoW2::FeatureVector::const_iterator f2it = vFeatVec2Cam.begin();
+                DBoW2::FeatureVector::const_iterator f1end = vFeatVec1Cam.end();
+                DBoW2::FeatureVector::const_iterator f2end = vFeatVec2Cam.end();
+
+                while(f1it!=f1end && f2it!=f2end)
+                {
+                    if(f1it->first == f2it->first)
+                    {
+                        for(size_t i1=0, iend1=f1it->second.size(); i1<iend1; i1++)
+                        {
+                            const size_t idx1_local = f1it->second[i1];
+                            if(idx1_local >= map1.size())
+                                continue;
+                            const size_t idx1 = map1[idx1_local];
+
+                            MapPoint* pMP1 = pKF1->GetMapPoint(idx1);
+                            if(pMP1)
+                                continue;
+
+                            const bool bStereo1 = (!pKF1->mpCamera2 && pKF1->mvuRight[idx1]>=0);
+                            if(bOnlyStereo && !bStereo1)
+                                continue;
+
+                            const cv::KeyPoint &kp1 = (pKF1 -> NLeft == -1) ? pKF1->mvKeysUn[idx1]
+                                                                            : (idx1 < pKF1 -> NLeft) ? pKF1 -> mvKeys[idx1]
+                                                                                                     : pKF1 -> mvKeysRight[idx1 - pKF1 -> NLeft];
+
+                            const bool bRight1 = (pKF1 -> NLeft == -1 || idx1 < pKF1 -> NLeft) ? false
+                                                                                               : true;
+
+                            const cv::Mat &d1 = pKF1->mDescriptors.row(idx1);
+
+                            int bestDist = TH_LOW;
+                            int bestIdx2 = -1;
+
+                            for(size_t i2=0, iend2=f2it->second.size(); i2<iend2; i2++)
+                            {
+                                size_t idx2_local = f2it->second[i2];
+                                if(idx2_local >= map2.size())
+                                    continue;
+                                size_t idx2 = map2[idx2_local];
+
+                                MapPoint* pMP2 = pKF2->GetMapPoint(idx2);
+                                if(vbMatched2[idx2] || pMP2)
+                                    continue;
+
+                                const bool bStereo2 = (!pKF2->mpCamera2 &&  pKF2->mvuRight[idx2]>=0);
+                                if(bOnlyStereo && !bStereo2)
+                                    continue;
+
+                                const cv::Mat &d2 = pKF2->mDescriptors.row(idx2);
+
+                                const int dist = DescriptorDistance(d1,d2);
+                                if(dist>TH_LOW || dist>bestDist)
+                                    continue;
+
+                                int camId1 = camId;
+                                int camId2 = camId;
+                                if(!pKF1->mvKeyPointCamId.empty())
+                                {
+                                    if(idx1 >= pKF1->mvKeyPointCamId.size())
+                                        continue;
+                                    camId1 = pKF1->mvKeyPointCamId[idx1];
+                                }
+                                if(!pKF2->mvKeyPointCamId.empty())
+                                {
+                                    if(idx2 >= pKF2->mvKeyPointCamId.size())
+                                        continue;
+                                    camId2 = pKF2->mvKeyPointCamId[idx2];
+                                }
+                                if(camId1 != camId2 || camId1 != camId)
+                                    continue;
+                                if(camId1 < 0 || camId1 >= static_cast<int>(vT12.size()))
+                                    continue;
+                                pCamera1 = pKF1->mvpCameras[camId1];
+                                pCamera2 = pKF2->mvpCameras[camId1];
+                                R12 = vR12[camId1];
+                                t12 = vt12[camId1];
+                                T12 = vT12[camId1];
+                                ep = vEp[camId1];
+
+                                const cv::KeyPoint &kp2 = (pKF2 -> NLeft == -1) ? pKF2->mvKeysUn[idx2]
+                                                                                : (idx2 < pKF2 -> NLeft) ? pKF2 -> mvKeys[idx2]
+                                                                                                         : pKF2 -> mvKeysRight[idx2 - pKF2 -> NLeft];
+                                const bool bRight2 = (pKF2 -> NLeft == -1 || idx2 < pKF2 -> NLeft) ? false
+                                                                                                   : true;
+
+                                if(!bStereo1 && !bStereo2 && !pKF1->mpCamera2)
+                                {
+                                    const float distex = ep(0)-kp2.pt.x;
+                                    const float distey = ep(1)-kp2.pt.y;
+                                    if(distex*distex+distey*distey<100*pKF2->mvScaleFactors[kp2.octave])
+                                    {
+                                        continue;
+                                    }
+                                }
+
+                                if(pKF1->mpCamera2 && pKF2->mpCamera2)
+                                {
+                                    if(bRight1 && bRight2){
+                                        R12 = Rrr; t12 = trr; T12 = Trr;
+                                        pCamera1 = pKF1->mpCamera2;
+                                        pCamera2 = pKF2->mpCamera2;
+                                    }
+                                    else if(bRight1 && !bRight2){
+                                        R12 = Rrl; t12 = trl; T12 = Trl;
+                                        pCamera1 = pKF1->mpCamera2;
+                                        pCamera2 = pKF2->mpCamera;
+                                    }
+                                    else if(!bRight1 && bRight2){
+                                        R12 = Rlr; t12 = tlr; T12 = Tlr;
+                                        pCamera1 = pKF1->mpCamera;
+                                        pCamera2 = pKF2->mpCamera2;
+                                    }
+                                    else{
+                                        R12 = Rll; t12 = tll; T12 = Tll;
+                                        pCamera1 = pKF1->mpCamera;
+                                        pCamera2 = pKF2->mpCamera;
+                                    }
+                                }
+
+                                if(bCoarse || pCamera1->epipolarConstrain(pCamera2,kp1,kp2,R12,t12,pKF1->mvLevelSigma2[kp1.octave],pKF2->mvLevelSigma2[kp2.octave]))
+                                {
+                                    bestIdx2 = static_cast<int>(idx2);
+                                    bestDist = dist;
+                                }
+                            }
+
+                            if(bestIdx2>=0)
+                            {
+                                const cv::KeyPoint &kp2 = (pKF2 -> NLeft == -1) ? pKF2->mvKeysUn[bestIdx2]
+                                                                                : (bestIdx2 < pKF2 -> NLeft) ? pKF2 -> mvKeys[bestIdx2]
+                                                                                                             : pKF2 -> mvKeysRight[bestIdx2 - pKF2 -> NLeft];
+                                vMatches12[idx1]=bestIdx2;
+                                nmatches++;
+
+                                if(mbCheckOrientation)
+                                {
+                                    float rot = kp1.angle-kp2.angle;
+                                    if(rot<0.0)
+                                        rot+=360.0f;
+                                    int bin = round(rot*factor);
+                                    if(bin==HISTO_LENGTH)
+                                        bin=0;
+                                    assert(bin>=0 && bin<HISTO_LENGTH);
+                                    rotHist[bin].push_back(static_cast<int>(idx1));
+                                }
+                            }
+                        }
+
+                        f1it++;
+                        f2it++;
+                    }
+                    else if(f1it->first < f2it->first)
+                        f1it = vFeatVec1Cam.lower_bound(f2it->first);
+                    else
+                        f2it = vFeatVec2Cam.lower_bound(f1it->first);
+                }
+
+                if(mbCheckOrientation)
+                {
+                    int ind1=-1, ind2=-1, ind3=-1;
+                    ComputeThreeMaxima(rotHist,HISTO_LENGTH,ind1,ind2,ind3);
+                    for(int i=0; i<HISTO_LENGTH; i++)
+                    {
+                        if(i==ind1 || i==ind2 || i==ind3)
+                            continue;
+                        for(size_t j=0, jend=rotHist[i].size(); j<jend; j++)
+                        {
+                            vMatches12[rotHist[i][j]]=-1;
+                            nmatches--;
+                        }
+                    }
+                }
+
+                for(size_t i=0, iend=vMatches12.size(); i<iend; i++)
+                {
+                    if(vMatches12[i]<0)
+                        continue;
+                    vMatchedPairs.push_back(make_pair(i,vMatches12[i]));
+                }
+                totalMatches += nmatches;
+            }
+            return totalMatches;
+        }
 
         // Find matches between not tracked keypoints
         // Matching speed-up by ORB Vocabulary

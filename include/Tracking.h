@@ -103,7 +103,11 @@ public:
     int GetNumberDataset();
     int GetMatchesInliers();
     int GetNumCams() const { return mnCams; }
+    int GetMainCamIndex() const { return mMainCamIndex; }
     void SetMainCamIndex(int camIndex);
+    void SetInitCamIndex(int camIndex);
+    const std::vector<Eigen::Vector3f>& GetRigPointCloud() const { return mRigPointCloud; }
+    const std::vector<Eigen::Vector3f>& GetRigFramePoints() const { return mRigFramePoints; }
 
     //DEBUG
     void SaveSubTrajectory(string strNameFile_frames, string strNameFile_kf, string strFolder="");
@@ -207,6 +211,11 @@ protected:
     void MonocularInitialization();
     //void CreateNewMapPoints();
     void CreateInitialMapMonocular();
+    Sophus::SE3f GrabImageMonocularForCam(const cv::Mat &im, const double &timestamp, string filename, int camId);
+    void UpdateRigPointCloud();
+    void InitRigGating(cv::FileStorage &fSettings);
+    void UpdateRigGating(Frame &frame);
+    void ApplyRigGating(Frame &frame);
 
     void CheckReplacedInLastFrame();
     bool TrackReferenceKeyFrame();
@@ -356,9 +365,24 @@ protected:
 
     int mnCams = 1;
     int mMainCamIndex = 0;
+    int mInitCamIndex = 0;
+    bool mbInitCamIndexExplicit = false;
     std::vector<GeometricCamera*> mvpCameras;
     std::vector<Sophus::SE3f> mvTcr;
     std::vector<ORBextractor*> mvpORBextractors;
+
+    std::vector<int> mvGateMinInliers;
+    std::vector<float> mvGateMaxReproj;
+    float mGateDelta = 0.5f;
+    float mGateRefInliers = 30.0f;
+    float mGateMinWeight = 0.2f;
+    float mGateRobustScale = 0.7f;
+
+    int mRigInitFrameId = -1;
+    int mRigInitGraceFrames = 30;
+
+    std::vector<Eigen::Vector3f> mRigPointCloud;
+    std::vector<Eigen::Vector3f> mRigFramePoints;
 
     int initID, lastID;
 

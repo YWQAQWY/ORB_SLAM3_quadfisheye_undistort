@@ -1,0 +1,17 @@
+./Examples/MultiFisheye/multi_fisheye_rig \
+Vocabulary/ORBvoc.txt \
+Config/multi_undistort_fisheye.yaml \
+Config/multi_undistort_fisheye.yaml \
+/home/yanwq/project003/dataset_dis/association.txt \
+1 1 \
+/home/yanwq/project003/ORB_SLAM3/Examples/MultiFisheye/output2_rig_dir
+
+
+
+./Examples/MultiFisheye/multi_fisheye_rig \
+Vocabulary/ORBvoc.txt \
+Config/multi_undistort_fisheye.yaml \
+Config/multi_undistort_fisheye.yaml \
+/home/yanwq/project002/undistort_294/association.txt \
+1 1 \
+/home/yanwq/project003/ORB_SLAM3/Examples/MultiFisheye/output1_rig_dir

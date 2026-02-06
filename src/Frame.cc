@@ -33,6 +33,22 @@
 namespace ORB_SLAM3
 {
 
+namespace {
+void RemapFeatureVector(DBoW2::FeatureVector &featVec, const std::vector<int> &indexMap)
+{
+    if(indexMap.empty())
+        return;
+    for(auto &kv : featVec)
+    {
+        for(auto &idx : kv.second)
+        {
+            if(idx < indexMap.size())
+                idx = static_cast<unsigned int>(indexMap[idx]);
+        }
+    }
+}
+}
+
 long unsigned int Frame::nNextId=0;
 bool Frame::mbInitialComputations=true;
 float Frame::cx, Frame::cy, Frame::fx, Frame::fy, Frame::invfx, Frame::invfy;
@@ -49,6 +65,8 @@ Frame::Frame(): mpcpi(NULL), mpImuPreintegrated(NULL), mpPrevFrame(NULL), mpImuP
     mTimeORB_Ext = 0;
 #endif
     mnCams = 1;
+    mvCamUsable.assign(1, 1);
+    mvCamWeights.assign(1, 1.0f);
 }
 
 
@@ -93,10 +111,14 @@ Frame::Frame(const Frame &frame)
     mmMatchedInImage = frame.mmMatchedInImage;
 
     mnCams = frame.mnCams;
+    mnMainCamIndex = frame.mnMainCamIndex;
     mvpCameras = frame.mvpCameras;
-    mvTcr = frame.mvTcr;
-    mvKeyPointCamId = frame.mvKeyPointCamId;
-    mvGrids = frame.mvGrids;
+     mvTcr = frame.mvTcr;
+     mvKeyPointCamId = frame.mvKeyPointCamId;
+     mvGrids = frame.mvGrids;
+     mvCamUsable = frame.mvCamUsable;
+     mvCamWeights = frame.mvCamWeights;
+     mvBowIndexToKeyId = frame.mvBowIndexToKeyId;
 
 #ifdef REGISTER_TIMES
     mTimeStereoMatch = frame.mTimeStereoMatch;
@@ -112,6 +134,12 @@ Frame::Frame(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timeSt
 {
     // Frame ID
     mnId=nNextId++;
+    mnMainCamIndex = 0;
+    mvCamUsable.assign(2, 1);
+    mvCamWeights.assign(2, 1.0f);
+    mnMainCamIndex = 0;
+    mvCamUsable.assign(1, 1);
+    mvCamWeights.assign(1, 1.0f);
 
     // Scale Level Info
     mnScaleLevels = mpORBextractorLeft->GetLevels();
@@ -219,6 +247,9 @@ Frame::Frame(const cv::Mat &imGray, const cv::Mat &imDepth, const double &timeSt
 {
     // Frame ID
     mnId=nNextId++;
+    mnMainCamIndex = 0;
+    mvCamUsable.assign(1, 1);
+    mvCamWeights.assign(1, 1.0f);
 
     // Scale Level Info
     mnScaleLevels = mpORBextractorLeft->GetLevels();
@@ -314,6 +345,9 @@ Frame::Frame(const cv::Mat &imGray, const double &timeStamp, ORBextractor* extra
 {
     // Frame ID
     mnId=nNextId++;
+    mnMainCamIndex = 0;
+    mvCamUsable.assign(1, 1);
+    mvCamWeights.assign(1, 1.0f);
 
     // Scale Level Info
     mnScaleLevels = mpORBextractorLeft->GetLevels();
@@ -421,8 +455,11 @@ Frame::Frame(const std::vector<cv::Mat> &images, const double &timeStamp,
     mnId=nNextId++;
 
      mnCams = static_cast<int>(cameras.size());
+     mnMainCamIndex = 0;
      mvpCameras = cameras;
      mvTcr = Tcr;
+     mvCamUsable.assign(mnCams, 1);
+     mvCamWeights.assign(mnCams, 1.0f);
      if(!mvpCameras.empty())
      {
          mpCamera = mvpCameras[0];
@@ -542,6 +579,7 @@ void Frame::AssignFeaturesToGrid()
             for(int ix = 0; ix < FRAME_GRID_COLS; ++ix){
                 mvGrids[cam][ix].resize(FRAME_GRID_ROWS);
                 for(int iy = 0; iy < FRAME_GRID_ROWS; ++iy){
+                    mvGrids[cam][ix][iy].clear();
                     mvGrids[cam][ix][iy].reserve(nReserve);
                 }
             }
@@ -550,8 +588,10 @@ void Frame::AssignFeaturesToGrid()
 
     for(unsigned int i=0; i<FRAME_GRID_COLS;i++)
         for (unsigned int j=0; j<FRAME_GRID_ROWS;j++){
+            mGrid[i][j].clear();
             mGrid[i][j].reserve(nReserve);
             if(Nleft != -1){
+                mGridRight[i][j].clear();
                 mGridRight[i][j].reserve(nReserve);
             }
         }
@@ -578,13 +618,48 @@ void Frame::AssignFeaturesToGrid()
                     mGrid[nGridPosX][nGridPosY].push_back(i);
                 else
                     mGridRight[nGridPosX][nGridPosY].push_back(i - Nleft);
-            } else if(camId == 0){
+            } else if(camId == mnMainCamIndex){
                 mGrid[nGridPosX][nGridPosY].push_back(i);
             } else if(camId < static_cast<int>(mvGrids.size())){
                 mvGrids[camId][nGridPosX][nGridPosY].push_back(i);
             }
         }
     }
+}
+
+void Frame::RebuildFeatureGrid()
+{
+    AssignFeaturesToGrid();
+}
+
+void Frame::SetMainCamera(int camId, const cv::Mat &image)
+{
+    if(camId < 0 || camId >= mnCams)
+        return;
+    if(camId >= static_cast<int>(mvpCameras.size()))
+        return;
+    mnMainCamIndex = camId;
+    mpCamera = mvpCameras[camId];
+    if(mpCamera && mpCamera->GetType() == GeometricCamera::CAM_PINHOLE)
+    {
+        Pinhole* pPin = static_cast<Pinhole*>(mpCamera);
+        mK = pPin->toK();
+        mK_ = pPin->toK_();
+        fx = mK.at<float>(0,0);
+        fy = mK.at<float>(1,1);
+        cx = mK.at<float>(0,2);
+        cy = mK.at<float>(1,2);
+        invfx = 1.0f/fx;
+        invfy = 1.0f/fy;
+    }
+    if(!image.empty())
+    {
+        ComputeImageBounds(image);
+        mfGridElementWidthInv = static_cast<float>(FRAME_GRID_COLS)/static_cast<float>(mnMaxX-mnMinX);
+        mfGridElementHeightInv = static_cast<float>(FRAME_GRID_ROWS)/static_cast<float>(mnMaxY-mnMinY);
+    }
+    mb = (fx != 0.0f) ? mbf/fx : 0.0f;
+    AssignFeaturesToGrid();
 }
 
 void Frame::ExtractORB(int flag, const cv::Mat &im, const int x0, const int x1)
@@ -684,7 +759,7 @@ Eigen::Vector3f Frame::GetRelativePoseTlr_translation() {
 bool Frame::isInFrustum(MapPoint *pMP, float viewingCosLimit)
 {
     if(mnCams > 1 && Nleft == -1)
-        return isInFrustum(pMP, viewingCosLimit, 0);
+        return isInFrustum(pMP, viewingCosLimit, mnMainCamIndex);
 
     if(Nleft == -1){
         pMP->mbTrackInView = false;
@@ -996,7 +1071,7 @@ vector<size_t> Frame::GetFeaturesInArea(const float &x, const float  &y, const f
         for(int iy = nMinCellY; iy<=nMaxCellY; iy++)
         {
             const vector<size_t> *pCell = nullptr;
-            if(camId == 0)
+            if(camId == mnMainCamIndex)
                 pCell = &mGrid[ix][iy];
             else if(camId < static_cast<int>(mvGrids.size()))
                 pCell = &mvGrids[camId][ix][iy];
@@ -1045,8 +1120,18 @@ void Frame::ComputeBoW()
 {
     if(mBowVec.empty())
     {
+        if(mnCams > 1 && !mvKeyPointCamId.empty())
+        {
+            ComputeBoW(mnMainCamIndex);
+            return;
+        }
+        mvBowIndexToKeyId.resize(mDescriptors.rows);
+        for(int i = 0; i < mDescriptors.rows; ++i)
+            mvBowIndexToKeyId[i] = i;
         vector<cv::Mat> vCurrentDesc = Converter::toDescriptorVector(mDescriptors);
         mpORBvocabulary->transform(vCurrentDesc,mBowVec,mFeatVec,4);
+        RemapFeatureVector(mFeatVec, mvBowIndexToKeyId);
+        mvBowIndexToKeyId.clear();
     }
 }
 
@@ -1060,10 +1145,14 @@ void Frame::ComputeBoW(int camId)
 
     vector<cv::Mat> vCurrentDesc;
     vCurrentDesc.reserve(mDescriptors.rows);
+    mvBowIndexToKeyId.clear();
     for(int i = 0; i < mDescriptors.rows; ++i)
     {
         if(i < static_cast<int>(mvKeyPointCamId.size()) && mvKeyPointCamId[i] == camId)
+        {
             vCurrentDesc.push_back(mDescriptors.row(i));
+            mvBowIndexToKeyId.push_back(i);
+        }
     }
 
     if(vCurrentDesc.empty())
@@ -1075,6 +1164,8 @@ void Frame::ComputeBoW(int camId)
     mBowVec.clear();
     mFeatVec.clear();
     mpORBvocabulary->transform(vCurrentDesc,mBowVec,mFeatVec,4);
+    RemapFeatureVector(mFeatVec, mvBowIndexToKeyId);
+    mvBowIndexToKeyId.clear();
 }
 
 void Frame::UndistortKeyPoints()

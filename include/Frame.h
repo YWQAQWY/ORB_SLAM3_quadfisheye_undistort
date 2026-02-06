@@ -235,6 +235,9 @@ public:
     // Number of cameras in the rig.
     int mnCams;
 
+    // Main camera index for rig-centric tracking.
+    int mnMainCamIndex = 0;
+
     // Vector of keypoints (original for visualization) and undistorted (actually used by the system).
     // In the stereo case, mvKeysUn is redundant as images must be rectified.
     // In the RGB-D case, RGB images can be distorted.
@@ -243,6 +246,13 @@ public:
 
     // Camera id per keypoint (rig camera index).
     std::vector<int> mvKeyPointCamId;
+
+    // Per-camera gating state and weights for rig-centric optimization.
+    std::vector<unsigned char> mvCamUsable;
+    std::vector<float> mvCamWeights;
+
+    // Map Bow descriptor indices to keypoint indices
+    std::vector<int> mvBowIndexToKeyId;
 
     // Corresponding stereo coordinate and depth for each keypoint.
     std::vector<MapPoint*> mvpMapPoints;
@@ -334,6 +344,12 @@ private:
 
     // Assign keypoints to the grid for speed up feature matching (called in the constructor).
     void AssignFeaturesToGrid();
+
+public:
+    void RebuildFeatureGrid();
+    void SetMainCamera(int camId, const cv::Mat &image);
+
+private:
 
     bool mbIsSet;
 

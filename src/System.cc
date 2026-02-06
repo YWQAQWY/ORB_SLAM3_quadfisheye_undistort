@@ -493,7 +493,7 @@ Sophus::SE3f System::TrackMonocular(const cv::Mat &im, const double &timestamp, 
 Sophus::SE3f System::TrackMulti(const std::vector<cv::Mat> &images, const double &timestamp, string filename)
 {
     if (images.empty()) {
-        cerr << "ERROR: TrackMulti expects at least one image (cam0)." << endl;
+        cerr << "ERROR: TrackMulti expects at least one image." << endl;
         return Sophus::SE3f();
     }
 
@@ -550,6 +550,22 @@ void System::SetMainCamIndex(int camIndex)
 {
     if(mpTracker)
         mpTracker->SetMainCamIndex(camIndex);
+}
+
+void System::SetInitCamIndex(int camIndex)
+{
+    if(mpTracker)
+        mpTracker->SetInitCamIndex(camIndex);
+}
+
+const std::vector<Eigen::Vector3f>& System::GetRigPointCloud()
+{
+    return mpTracker->GetRigPointCloud();
+}
+
+const std::vector<Eigen::Vector3f>& System::GetRigFramePoints()
+{
+    return mpTracker->GetRigFramePoints();
 }
 
 

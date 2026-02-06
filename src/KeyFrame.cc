@@ -23,6 +23,33 @@
 
 namespace ORB_SLAM3
 {
+namespace {
+cv::Mat BuildDescriptorSubset(const cv::Mat &descriptors, const std::vector<int> &indices)
+{
+    if(descriptors.empty() || indices.empty())
+        return cv::Mat();
+    cv::Mat subset(static_cast<int>(indices.size()), descriptors.cols, descriptors.type());
+    for(size_t i = 0; i < indices.size(); ++i)
+    {
+        descriptors.row(indices[i]).copyTo(subset.row(static_cast<int>(i)));
+    }
+    return subset;
+}
+
+void RemapFeatureVector(DBoW2::FeatureVector &featVec, const std::vector<int> &indexMap)
+{
+    if(indexMap.empty())
+        return;
+    for(auto &kv : featVec)
+    {
+        for(auto &idx : kv.second)
+        {
+            if(idx < indexMap.size())
+                idx = static_cast<unsigned int>(indexMap[idx]);
+        }
+    }
+}
+}
 
 long unsigned int KeyFrame::nNextId=0;
 
@@ -34,6 +61,7 @@ KeyFrame::KeyFrame():
         fx(0), fy(0), cx(0), cy(0), invfx(0), invfy(0), mnPlaceRecognitionQuery(0), mnPlaceRecognitionWords(0), mPlaceRecognitionScore(0),
         mbf(0), mb(0), mThDepth(0), N(0), mnCams(0), mvKeys(static_cast<vector<cv::KeyPoint> >(NULL)), mvKeysUn(static_cast<vector<cv::KeyPoint> >(NULL)),
         mvKeyPointCamId(static_cast<vector<int> >(NULL)), mvuRight(static_cast<vector<float> >(NULL)), mvDepth(static_cast<vector<float> >(NULL)),
+        mnMainCamIndex(0),
         mnScaleLevels(0), mfScaleFactor(0),
         mfLogScaleFactor(0), mvScaleFactors(0), mvLevelSigma2(0), mvInvLevelSigma2(0), mnMinX(0), mnMinY(0), mnMaxX(0),
         mnMaxY(0), mPrevKF(static_cast<KeyFrame*>(NULL)), mNextKF(static_cast<KeyFrame*>(NULL)), mbFirstConnection(true), mpParent(NULL), mbNotErase(false),
@@ -51,6 +79,7 @@ KeyFrame::KeyFrame(Frame &F, Map *pMap, KeyFrameDatabase *pKFDB):
     fx(F.fx), fy(F.fy), cx(F.cx), cy(F.cy), invfx(F.invfx), invfy(F.invfy),
     mbf(F.mbf), mb(F.mb), mThDepth(F.mThDepth), N(F.N), mnCams(F.mnCams), mvKeys(F.mvKeys), mvKeysUn(F.mvKeysUn),
     mvKeyPointCamId(F.mvKeyPointCamId), mvuRight(F.mvuRight), mvDepth(F.mvDepth), mDescriptors(F.mDescriptors.clone()),
+    mnMainCamIndex(F.mnMainCamIndex),
     mBowVec(F.mBowVec), mFeatVec(F.mFeatVec), mnScaleLevels(F.mnScaleLevels), mfScaleFactor(F.mfScaleFactor),
     mfLogScaleFactor(F.mfLogScaleFactor), mvScaleFactors(F.mvScaleFactors), mvLevelSigma2(F.mvLevelSigma2),
     mvInvLevelSigma2(F.mvInvLevelSigma2), mnMinX(F.mnMinX), mnMinY(F.mnMinY), mnMaxX(F.mnMaxX),
@@ -81,6 +110,9 @@ KeyFrame::KeyFrame(Frame &F, Map *pMap, KeyFrameDatabase *pKFDB):
     mvGrids = F.mvGrids;
     mvpCameras = F.mvpCameras;
     mvTcr = F.mvTcr;
+    mvCamUsable = F.mvCamUsable;
+    mvCamWeights = F.mvCamWeights;
+    mvBowIndexToKeyId = F.mvBowIndexToKeyId;
 
     if(!mpCamera && !mvpCameras.empty())
     {
@@ -109,10 +141,35 @@ void KeyFrame::ComputeBoW()
 {
     if(mBowVec.empty() || mFeatVec.empty())
     {
-        vector<cv::Mat> vCurrentDesc = Converter::toDescriptorVector(mDescriptors);
+        cv::Mat bowDesc = mDescriptors;
+        if(mnCams > 1 && !mvKeyPointCamId.empty())
+        {
+            std::vector<int> mainIndices;
+            mainIndices.reserve(mvKeyPointCamId.size());
+            for(size_t i = 0; i < mvKeyPointCamId.size(); ++i)
+            {
+                if(mvKeyPointCamId[i] == mnMainCamIndex)
+                    mainIndices.push_back(static_cast<int>(i));
+            }
+            cv::Mat subset = BuildDescriptorSubset(mDescriptors, mainIndices);
+            if(!subset.empty())
+            {
+                bowDesc = subset;
+                mvBowIndexToKeyId = mainIndices;
+            }
+        }
+        if(mvBowIndexToKeyId.empty())
+        {
+            mvBowIndexToKeyId.resize(mDescriptors.rows);
+            for(int i = 0; i < mDescriptors.rows; ++i)
+                mvBowIndexToKeyId[i] = i;
+        }
+        vector<cv::Mat> vCurrentDesc = Converter::toDescriptorVector(bowDesc);
         // Feature vector associate features with nodes in the 4th level (from leaves up)
         // We assume the vocabulary tree has 6 levels, change the 4 otherwise
         mpORBvocabulary->transform(vCurrentDesc,mBowVec,mFeatVec,4);
+        RemapFeatureVector(mFeatVec, mvBowIndexToKeyId);
+        mvBowIndexToKeyId.clear();
     }
 }
 
@@ -789,7 +846,7 @@ vector<size_t> KeyFrame::GetFeaturesInArea(const float &x, const float &y, const
         for(int iy = nMinCellY; iy<=nMaxCellY; iy++)
         {
             const vector<size_t> *pCell = nullptr;
-            if(camId == 0)
+            if(camId == mnMainCamIndex)
                 pCell = &mGrid[ix][iy];
             else if(camId < static_cast<int>(mvGrids.size()))
                 pCell = &mvGrids[camId][ix][iy];

@@ -399,6 +399,12 @@ void LocalMapping::CreateNewMapPoints()
         nn = 20;
     vector<KeyFrame*> vpNeighKFs = mpCurrentKeyFrame->GetBestCovisibilityKeyFrames(nn);
 
+    if(mpCurrentKeyFrame && mpCurrentKeyFrame->mnCams > 1 && mpCurrentKeyFrame->NLeft == -1)
+    {
+        if(vpNeighKFs.empty() && mpCurrentKeyFrame->mPrevKF)
+            vpNeighKFs.push_back(mpCurrentKeyFrame->mPrevKF);
+    }
+
     if (mbInertial)
     {
         KeyFrame* pKF = mpCurrentKeyFrame;
@@ -443,6 +449,7 @@ void LocalMapping::CreateNewMapPoints()
     int countStereoGoodProj = 0;
     int countStereoAttempt = 0;
     int totalStereoPts = 0;
+
     // Search matches with epipolar restriction and triangulate
     for(size_t i=0; i<vpNeighKFs.size(); i++)
     {
@@ -507,6 +514,11 @@ void LocalMapping::CreateNewMapPoints()
                 if(idx1 >= static_cast<int>(mpCurrentKeyFrame->mvKeyPointCamId.size()))
                     continue;
                 camCandidate = mpCurrentKeyFrame->mvKeyPointCamId[idx1];
+                if(camCandidate >= 0 && camCandidate < static_cast<int>(mpCurrentKeyFrame->mvCamUsable.size()))
+                {
+                    if(!mpCurrentKeyFrame->mvCamUsable[camCandidate])
+                        continue;
+                }
                 if(camCandidate >= 0 && camCandidate < static_cast<int>(vCandidatePerCam.size()))
                     vCandidatePerCam[camCandidate]++;
             }
@@ -547,6 +559,10 @@ void LocalMapping::CreateNewMapPoints()
                 if(camId1 != camId2)
                     continue;
                 if(camId1 < 0 || camId1 >= mpCurrentKeyFrame->mnCams)
+                    continue;
+                if(camId1 < static_cast<int>(mpCurrentKeyFrame->mvCamUsable.size()) && !mpCurrentKeyFrame->mvCamUsable[camId1])
+                    continue;
+                if(camId1 < static_cast<int>(pKF2->mvCamUsable.size()) && !pKF2->mvCamUsable[camId1])
                     continue;
                 if(camId1 >= static_cast<int>(mpCurrentKeyFrame->mvTcr.size()) || camId1 >= static_cast<int>(pKF2->mvTcr.size()))
                     continue;

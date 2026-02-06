@@ -69,6 +69,16 @@ Camera3.k4: 0.0
 Camera3.width: 1920
 Camera3.height: 1536
 
+# Rig settings
+Rig.main_cam: "Front"
+Rig.init_cam: "Front"
+Rig.gate_inliers: [30, 10, 10, 10]
+Rig.gate_reproj: [5.0, 5.0, 5.0, 5.0]
+Rig.gate_delta: 0.5
+Rig.gate_ref_inliers: 30
+Rig.gate_min_weight: 0.2
+Rig.gate_robust_scale: 0.7
+
 # Extrinsics: 
 Camera0.Twc: !!opencv-matrix
    rows: 4

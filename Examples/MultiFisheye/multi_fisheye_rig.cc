@@ -1,11 +1,12 @@
 #include <algorithm>
 #include <array>
+#include <algorithm>
+#include <cctype>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <string>
-#include <unordered_set>
 #include <vector>
 
 #include <Eigen/Core>
@@ -57,7 +58,58 @@ static bool LoadAssociation(const string &association_path, vector<FrameEntry> &
     return !entries.empty();
 }
 
-static bool ReadRigExtrinsics(const string &config_path, array<Sophus::SE3f, 4> &tbc_cams)
+static string ToLower(string value)
+{
+    transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(tolower(c));
+    });
+    return value;
+}
+
+static int NormalizeCamIndex(int camIndex, int nCam)
+{
+    if(camIndex < 0)
+        return 0;
+    if(nCam > 0 && camIndex >= nCam)
+        return 0;
+    return camIndex;
+}
+
+static int ParseRigCamIndex(const cv::FileStorage &fs, const string &key, int nCam, int defaultIndex, bool *wasSet)
+{
+    if(wasSet)
+        *wasSet = false;
+    cv::FileNode node = fs[key];
+    if(node.empty())
+        return defaultIndex;
+    if(wasSet)
+        *wasSet = true;
+    if(node.isInt())
+        return NormalizeCamIndex(node.operator int(), nCam);
+    if(node.isString())
+    {
+        string value = ToLower(node.string());
+        if(value == "front")
+            return NormalizeCamIndex(1, nCam);
+        if(value == "left")
+            return NormalizeCamIndex(0, nCam);
+        if(value == "right")
+            return NormalizeCamIndex(2, nCam);
+        if(value == "rear")
+            return NormalizeCamIndex(3, nCam);
+        try
+        {
+            return NormalizeCamIndex(stoi(value), nCam);
+        }
+        catch(const std::exception &)
+        {
+            return defaultIndex;
+        }
+    }
+    return defaultIndex;
+}
+
+static bool ReadRigExtrinsics(const string &config_path, int main_cam_index, array<Sophus::SE3f, 4> &tbc_cams)
 {
     cv::FileStorage fs(config_path, cv::FileStorage::READ);
     if (!fs.isOpened()) {
@@ -88,9 +140,10 @@ static bool ReadRigExtrinsics(const string &config_path, array<Sophus::SE3f, 4> 
         }
         twc_cams[i] = Twc;
     }
-    const Sophus::SE3f &Twc_front = twc_cams[0];
+    main_cam_index = NormalizeCamIndex(main_cam_index, 4);
+    const Sophus::SE3f &Twc_main = twc_cams[main_cam_index];
     for (int i = 0; i < 4; ++i) {
-        tbc_cams[i] = twc_cams[i].inverse() * Twc_front;
+        tbc_cams[i] = twc_cams[i].inverse() * Twc_main;
     }
     return true;
 }
@@ -149,11 +202,11 @@ static void SavePoints(const string &path, const vector<Eigen::Vector3f> &points
 
 int main(int argc, char **argv)
 {
-    if (argc != 7) {
+    if (argc != 6 && argc != 7 && argc != 8) {
         cerr << endl
              << "Usage: ./multi_fisheye_rig path_to_vocabulary "
              << "path_to_settings path_to_extrinsics "
-             << "path_to_association main_cam_index output_dir" << endl;
+             << "path_to_association [main_cam_index] [init_cam_index] output_dir" << endl;
         return 1;
     }
 
@@ -161,17 +214,46 @@ int main(int argc, char **argv)
     string settings_path = argv[2];
     string extrinsics_path = argv[3];
     string association_path = argv[4];
-    int main_cam_index = stoi(argv[5]);
-    string output_dir = argv[6];
-
-    if (main_cam_index < 0 || main_cam_index > 3) {
-        cerr << "main_cam_index must be 0..3" << endl;
-        return 1;
+    int main_cam_index = -1;
+    int init_cam_index = -1;
+    string output_dir;
+    if (argc == 6) {
+        output_dir = argv[5];
+    } else if (argc == 7) {
+        main_cam_index = stoi(argv[5]);
+        output_dir = argv[6];
+    } else {
+        main_cam_index = stoi(argv[5]);
+        init_cam_index = stoi(argv[6]);
+        output_dir = argv[7];
     }
 
-    cout << "Main camera index for initialization: " << main_cam_index << endl;
+    cv::FileStorage fs(settings_path, cv::FileStorage::READ);
+    if (!fs.isOpened()) {
+        cerr << "Failed to open settings: " << settings_path << endl;
+    }
+    bool main_cam_set = false;
+    bool init_cam_set = false;
+    int config_main_cam = 0;
+    int config_init_cam = 0;
+    if (fs.isOpened()) {
+        config_main_cam = ParseRigCamIndex(fs, "Rig.main_cam", 4, 0, &main_cam_set);
+        if (!main_cam_set)
+            config_main_cam = ParseRigCamIndex(fs, "Rig.cam_main", 4, config_main_cam, &main_cam_set);
+        config_init_cam = ParseRigCamIndex(fs, "Rig.init_cam", 4, config_main_cam, &init_cam_set);
+        if (!init_cam_set)
+            config_init_cam = ParseRigCamIndex(fs, "Rig.cam_init", 4, config_init_cam, &init_cam_set);
+    }
 
-    const int rig_cam_index = 0;
+    if (main_cam_index < 0)
+        main_cam_index = config_main_cam;
+    if (init_cam_index < 0)
+        init_cam_index = init_cam_set ? config_init_cam : main_cam_index;
+    main_cam_index = NormalizeCamIndex(main_cam_index, 4);
+    init_cam_index = NormalizeCamIndex(init_cam_index, 4);
+
+    cout << "Rig main camera index: " << main_cam_index << endl;
+    cout << "Rig init camera index: " << init_cam_index << endl;
 
     vector<FrameEntry> entries;
     if (!LoadAssociation(association_path, entries)) {
@@ -180,28 +262,24 @@ int main(int argc, char **argv)
     }
 
     array<Sophus::SE3f, 4> T_b_c;
-    if (!ReadRigExtrinsics(extrinsics_path,T_b_c)) {
+    if (!ReadRigExtrinsics(extrinsics_path, main_cam_index, T_b_c)) {
         cerr << "Failed to load extrinsics file: " << extrinsics_path << endl;
         return 1;
     }
 
-    ORB_SLAM3::System SLAM(vocab_path, settings_path, ORB_SLAM3::System::MONOCULAR, true);
+    ORB_SLAM3::System SLAM(vocab_path, settings_path, ORB_SLAM3::System::MONOCULAR, false);
     SLAM.SetMainCamIndex(main_cam_index);
+    SLAM.SetInitCamIndex(init_cam_index);
     //ORB_SLAM3::System SLAM(vocab_path, settings_path, ORB_SLAM3::System::MONOCULAR, true);
     float imageScale = SLAM.GetImageScale();
 
-    Sophus::SE3f T_b_c0 = T_b_c[rig_cam_index];
-    Sophus::SE3f T_c0_b = T_b_c0.inverse();
+    Sophus::SE3f T_b_cmain = T_b_c[main_cam_index];
+    Sophus::SE3f T_cmain_b = T_b_cmain.inverse();
 
     array<Sophus::SE3f, 4> T_r_c;
     for (int cam = 0; cam < 4; ++cam) {
-        T_r_c[cam] = T_c0_b * T_b_c[cam];
+        T_r_c[cam] = T_cmain_b * T_b_c[cam];
     }
-
-    array<vector<Eigen::Vector3f>, 4> per_cam_points;
-    vector<Eigen::Vector3f> merged_points;
-    array<unordered_set<ORB_SLAM3::MapPoint*>, 4> per_cam_point_ids;
-    unordered_set<ORB_SLAM3::MapPoint*> merged_point_ids;
 
     string traj_dir = output_dir;
     array<ofstream, 4> traj_files;
@@ -252,7 +330,12 @@ int main(int argc, char **argv)
         }
 
         Sophus::SE3f Tcw = SLAM.TrackMulti(gray_images, entries[ni].timestamp);
-        if (SLAM.GetTrackingState() != ORB_SLAM3::Tracking::OK) {
+        const int track_state = SLAM.GetTrackingState();
+        if (ni % 200 == 0) {
+            const auto map_points = SLAM.GetAllMapPoints();
+            cout << "[Map] frame=" << ni << " state=" << track_state << " MP=" << map_points.size() << endl;
+        }
+        if (track_state != ORB_SLAM3::Tracking::OK) {
             continue;
         }
 
@@ -264,51 +347,24 @@ int main(int argc, char **argv)
             WritePose(traj_files[cam], entries[ni].timestamp, T_w_ci);
         }
 
+
     }
 
     SLAM.Shutdown();
 
+    vector<Eigen::Vector3f> map_points;
     const vector<ORB_SLAM3::MapPoint*> all_points = SLAM.GetAllMapPoints();
-    for (int cam = 0; cam < 4; ++cam) {
-        per_cam_points[cam].clear();
-        per_cam_point_ids[cam].clear();
-    }
-    merged_points.clear();
-    merged_point_ids.clear();
-
-    for (ORB_SLAM3::MapPoint *mp : all_points) {
-        if (!mp || mp->isBad()) {
+    map_points.reserve(all_points.size());
+    for(ORB_SLAM3::MapPoint* mp : all_points)
+    {
+        if(!mp || mp->isBad())
             continue;
-        }
-        const auto observations = mp->GetObservations();
-        Eigen::Vector3f pos = mp->GetWorldPos();
-        bool added = false;
-        for (const auto &kv : observations) {
-            const vector<int> &indexes = kv.second;
-            for (size_t cam_id = 0; cam_id < indexes.size() && cam_id < 4; ++cam_id) {
-                if (indexes[cam_id] == -1) {
-                    continue;
-                }
-                if (per_cam_point_ids[cam_id].insert(mp).second) {
-                    per_cam_points[cam_id].push_back(pos);
-                }
-                added = true;
-            }
-        }
-        if (added && merged_point_ids.insert(mp).second) {
-            merged_points.push_back(pos);
-        }
-    }
-
-    for (int cam = 0; cam < 4; ++cam) {
-        string map_path = output_dir + "/map_rig_cam" + to_string(cam) + ".xyz";
-        SavePoints(map_path, per_cam_points[cam]);
-        cout << "Saved " << map_path << " with " << per_cam_points[cam].size() << " points" << endl;
+        map_points.push_back(mp->GetWorldPos());
     }
 
     string merged_path = output_dir + "/map_rig_fused.xyz";
-    SavePoints(merged_path, merged_points);
-    cout << "Saved " << merged_path << " with " << merged_points.size() << " points" << endl;
+    SavePoints(merged_path, map_points);
+    cout << "Saved " << merged_path << " with " << map_points.size() << " points" << endl;
 
     return 0;
 }
